@@ -1,7 +1,15 @@
 from pathlib import Path
 import os
+import pymysql
 
 from dotenv import load_dotenv
+
+
+# ============================================================
+# PYMYSQL - USE PYTHON MYSQL DRIVER
+# ============================================================
+
+pymysql.install_as_MySQLdb()
 
 
 # ============================================================
@@ -49,7 +57,7 @@ ALLOWED_HOSTS = [
 
 INSTALLED_APPS = [
     # Django
-     "daphne",
+    "daphne",
     "django.contrib.admin",
     "django.contrib.auth",
     "django.contrib.contenttypes",
@@ -125,12 +133,17 @@ TEMPLATES = [
 
 
 # ============================================================
-# WSGI
+# WSGI / ASGI
 # ============================================================
 
 WSGI_APPLICATION = "seiyalam_backend.wsgi.application"
 
 ASGI_APPLICATION = "seiyalam_backend.asgi.application"
+
+
+# ============================================================
+# CHANNELS / REDIS
+# ============================================================
 
 CHANNEL_LAYERS = {
     "default": {
@@ -145,7 +158,7 @@ CHANNEL_LAYERS = {
 
 
 # ============================================================
-# DATABASE - MYSQL
+# DATABASE - MYSQL / TIDB CLOUD
 # ============================================================
 
 DATABASES = {
@@ -154,7 +167,7 @@ DATABASES = {
 
         "NAME": os.getenv(
             "DB_NAME",
-            "seiyalam_db",
+            "sys",
         ),
 
         "USER": os.getenv(
@@ -176,6 +189,16 @@ DATABASES = {
             "DB_PORT",
             "3306",
         ),
+
+        # TiDB Cloud requires TLS for public connections.
+        # PyMySQL handles the TLS connection.
+        "OPTIONS": {
+            "ssl": {
+                "ca": str(
+                    BASE_DIR / "certs" / "isrgrootx1.pem"
+                ),
+            },
+        },
     }
 }
 
@@ -261,10 +284,6 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 # DJANGO REST FRAMEWORK
 # ============================================================
 
-# ============================================================
-# DJANGO REST FRAMEWORK
-# ============================================================
-
 REST_FRAMEWORK = {
 
     # JWT authentication
@@ -293,8 +312,8 @@ REST_FRAMEWORK = {
     "DEFAULT_SCHEMA_CLASS": (
         "drf_spectacular.openapi.AutoSchema"
     ),
-
 }
+
 
 # ============================================================
 # CORS

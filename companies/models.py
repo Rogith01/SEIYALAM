@@ -1,3 +1,5 @@
+
+from django.core.exceptions import ValidationError
 from django.db import models
 
 
@@ -37,6 +39,66 @@ class Company(models.Model):
     updated_at = models.DateTimeField(
         auto_now=True,
     )
+
+    def clean(self):
+        """
+        Company phone belongs to the STAFF phone pool.
+
+        Therefore a Company phone cannot be the same as:
+        - Founder phone
+        - Admin phone
+        - Worker phone
+        - Another Company phone
+        """
+
+        if self.phone:
+            # Check another Company
+            existing_company = (
+                Company.objects
+                .filter(phone=self.phone)
+                .exclude(pk=self.pk)
+                .first()
+            )
+
+            if existing_company:
+                raise ValidationError({
+                    "phone": (
+                        "This phone number is already registered "
+                        "to another company."
+                    )
+                })
+
+            # Check Founder/Admin/Worker
+            #
+            # Import inside the method to avoid circular imports
+            # between accounts and companies models.
+            from accounts.models import User
+
+            existing_staff = (
+                User.objects
+                .filter(
+                    phone=self.phone,
+                    phone_group="STAFF",
+                )
+                .first()
+            )
+
+            if existing_staff:
+                raise ValidationError({
+                    "phone": (
+                        "This phone number is already registered "
+                        "to a Founder, Admin, or Worker."
+                    )
+                })
+
+    def save(self, *args, **kwargs):
+        """
+        Validate Company phone before saving.
+        """
+
+        self.full_clean()
+
+        super().save(*args, **kwargs)
 
     def __str__(self):
         return self.name

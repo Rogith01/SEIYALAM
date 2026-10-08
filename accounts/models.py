@@ -1,6 +1,6 @@
+
 from django.contrib.auth.models import AbstractUser
 from django.db import models
-from django.db.models import Case, When, Value
 
 
 class User(AbstractUser):
@@ -60,25 +60,18 @@ class User(AbstractUser):
         blank=True,
     )
 
-    # Automatically determines which phone-number pool
-    # the account belongs to.
+    # Phone-number pool.
     #
     # Founder/Admin/Worker -> STAFF
     # Customer             -> CUSTOMER
-    phone_group = models.GeneratedField(
-        expression=Case(
-            When(
-                role__in=[
-                    "FOUNDER",
-                    "ADMIN",
-                    "WORKER",
-                ],
-                then=Value("STAFF"),
-            ),
-            default=Value("CUSTOMER"),
-        ),
-        output_field=models.CharField(max_length=8),
-        db_persist=True,
+    #
+    # Normal database column instead of GeneratedField
+    # because TiDB does not support the required generated
+    # stored column ALTER TABLE operation.
+    phone_group = models.CharField(
+        max_length=8,
+        default="CUSTOMER",
+        editable=False,
     )
 
     # True only after the phone number has been verified by OTP.
@@ -111,6 +104,25 @@ class User(AbstractUser):
         blank=True,
         related_name="workers",
     )
+
+    def save(self, *args, **kwargs):
+        """
+        Automatically keep phone_group synchronized with the user's role.
+
+        FOUNDER / ADMIN / WORKER -> STAFF
+        CUSTOMER                 -> CUSTOMER
+        """
+
+        if self.role in [
+            self.Role.FOUNDER,
+            self.Role.ADMIN,
+            self.Role.WORKER,
+        ]:
+            self.phone_group = "STAFF"
+        else:
+            self.phone_group = "CUSTOMER"
+
+        super().save(*args, **kwargs)
 
     class Meta:
         constraints = [
@@ -177,6 +189,7 @@ class CustomerCompany(models.Model):
 # PHONE OTP
 # ============================================================
 
+
 class PhoneOTP(models.Model):
 
     class Purpose(models.TextChoices):
@@ -184,10 +197,12 @@ class PhoneOTP(models.Model):
             "PHONE_VERIFICATION",
             "Phone Verification",
         )
+
         PASSWORD_RESET = (
             "PASSWORD_RESET",
             "Password Reset",
         )
+
         PHONE_CHANGE = (
             "PHONE_CHANGE",
             "Phone Change",

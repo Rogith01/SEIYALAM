@@ -228,7 +228,7 @@ if (!/^\d{10}$/.test(phone)) {
       let message =
         data?.message ||
         data?.detail ||
-        "Unable to create customer account.";
+        "Unable to create customer account.Change phone number or user name";
 
       // Handle Django/DRF validation errors.
       const errors = data?.errors || data;

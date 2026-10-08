@@ -243,78 +243,86 @@ function Workers() {
   // CREATE WORKER
   // ============================================================
 
-  const handleCreateWorker = async (event) => {
-    event.preventDefault();
 
-    try {
-      setCreatingWorker(true);
-      setCreateError("");
+const handleCreateWorker = async (event) => {
+  event.preventDefault();
+
+  try {
+    setCreatingWorker(true);
+    setCreateError("");
+    setCreateSuccess("");
+
+    const payload = {
+      username: workerForm.username.trim(),
+      email: workerForm.email.trim(),
+      password: workerForm.password,
+      phone: workerForm.phone.trim(),
+      employee_id: workerForm.employee_id.trim(),
+      joining_date: workerForm.joining_date || null,
+      availability: workerForm.availability,
+      address: workerForm.address.trim(),
+      skills: workerForm.skills,
+    };
+
+    await api.post("/workers/create/", payload);
+
+    setCreateSuccess("Worker created successfully.");
+
+    setWorkerForm({
+      username: "",
+      email: "",
+      password: "",
+      phone: "",
+      employee_id: "",
+      joining_date: "",
+      availability: "AVAILABLE",
+      address: "",
+      skills: [],
+    });
+
+    await fetchWorkers();
+
+    setTimeout(() => {
+      setShowAddWorker(false);
       setCreateSuccess("");
+    }, 1000);
+  } catch (err) {
+    console.error("FULL ERROR:", err);
 
-      const payload = {
-        username: workerForm.username.trim(),
-        email: workerForm.email.trim(),
-        password: workerForm.password,
-        phone: workerForm.phone.trim(),
-        employee_id: workerForm.employee_id.trim(),
-        joining_date: workerForm.joining_date || null,
-        availability: workerForm.availability,
-        address: workerForm.address.trim(),
-        skills: workerForm.skills,
-      };
+    const responseData = err.response?.data;
 
-      await api.post("/workers/create/", payload);
+    console.log("WORKER CREATE ERROR:", responseData);
+    console.log("ERROR TYPE:", typeof responseData?.error);
+    console.log("ERROR VALUE:", responseData?.error);
 
-      setCreateSuccess("Worker created successfully.");
-
-      setWorkerForm({
-        username: "",
-        email: "",
-        password: "",
-        phone: "",
-        employee_id: "",
-        joining_date: "",
-        availability: "AVAILABLE",
-        address: "",
-        skills: [],
-      });
-
-      await fetchWorkers();
-
-      setTimeout(() => {
-        setShowAddWorker(false);
-        setCreateSuccess("");
-      }, 1000);
-    } catch (err) {
-      console.error(err);
-
-      const responseData = err.response?.data;
-
-      if (responseData) {
-        if (typeof responseData === "string") {
-          setCreateError(responseData);
-        } else {
-          const messages = Object.entries(responseData).map(
-            ([field, message]) => {
-              const formattedMessage = Array.isArray(message)
-                ? message.join(", ")
-                : message;
-
-              return `${field}: ${formattedMessage}`;
-            }
-          );
-
-          setCreateError(
-            messages.join(" | ") || "Unable to create worker."
-          );
-        }
+    if (responseData) {
+      if (typeof responseData === "string") {
+        setCreateError(responseData);
+      } else if (responseData.error) {
+        setCreateError(responseData.error);
       } else {
-        setCreateError("Unable to create worker.");
+        const messages = Object.entries(responseData).map(
+          ([field, message]) => {
+            const formattedMessage = Array.isArray(message)
+              ? message.join(", ")
+              : message;
+
+            return `${field}: ${formattedMessage}`;
+          }
+        );
+
+        setCreateError(
+          messages.join(" | ") || "Unable to create worker."
+        );
       }
-    } finally {
-      setCreatingWorker(false);
+    } else {
+      setCreateError("Unable to create worker.");
     }
-  };
+  } finally {
+    setCreatingWorker(false);
+  }
+};
+
 
   // ============================================================
   // VIEW WORKER

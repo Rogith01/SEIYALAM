@@ -7,11 +7,14 @@ from django.contrib.auth.hashers import (
     make_password,
     check_password,
 )
-import re 
+
+import re
+import secrets
+
+from django.db import IntegrityError
+
 from asgiref.sync import async_to_sync
 from channels.layers import get_channel_layer
-
-import secrets
 
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.views import APIView
@@ -66,6 +69,8 @@ from .permissions import (
     IsWorkerUserRole,
     IsCustomerUserRole,
 )
+
+
 # ============================================================
 # HELPERS
 # ============================================================
@@ -109,6 +114,7 @@ def create_company_admin_notifications(
             message=message,
         )
 
+
 def create_audit_log(
     user,
     company,
@@ -143,6 +149,7 @@ class CompanyListView(
             id=self.request.user.company_id
         )
 
+
 class CompanyDetailView(
     generics.RetrieveAPIView
 ):
@@ -158,19 +165,23 @@ class CompanyDetailView(
         user = self.request.user
 
         if user.role == User.Role.ADMIN:
+
             return Company.objects.filter(
                 id=user.company_id
             )
 
         if user.role == User.Role.CUSTOMER:
+
             return Company.objects.all()
 
         if user.role == User.Role.WORKER:
+
             return Company.objects.filter(
                 id=user.company_id
             )
 
         return Company.objects.none()
+
 
 class CustomerCompanyListView(
     generics.ListAPIView
@@ -258,22 +269,18 @@ class CustomerRegistrationView(
                 ),
                 "user": {
                     "id": user.id,
-
                     "name": user.name,
-
                     "username": user.username,
-
                     "email": user.email,
-
                     "phone": user.phone,
-
                     "phone_verified": user.phone_verified,
-
                     "role": user.role,
                 },
             },
             status=status.HTTP_201_CREATED,
         )
+
+
 # ============================================================
 # CUSTOMERS
 # ============================================================
@@ -292,7 +299,9 @@ class CustomerListView(
 
         customer_ids = (
             ServiceRequest.objects
-            .filter(company_id=self.request.user.company_id)
+            .filter(
+                company_id=self.request.user.company_id
+            )
             .values_list("customer_id", flat=True)
             .distinct()
         )
@@ -400,15 +409,26 @@ class WorkerListView(
             "username"
         )
 
-class WorkerCreateView(generics.CreateAPIView):
-    serializer_class = WorkerCreateSerializer
-    permission_classes = [IsAdminUserRole]
 
-    def perform_create(self, serializer):
+class WorkerCreateView(
+    generics.CreateAPIView
+):
+
+    serializer_class = WorkerCreateSerializer
+
+    permission_classes = [
+        IsAdminUserRole
+    ]
+
+    def perform_create(
+        self,
+        serializer
+    ):
 
         user = self.request.user
 
         if not user.company:
+
             from rest_framework.exceptions import ValidationError
 
             raise ValidationError(
@@ -418,19 +438,76 @@ class WorkerCreateView(generics.CreateAPIView):
                 }
             )
 
-        serializer.save()
-class WorkerDetailView(generics.RetrieveUpdateDestroyAPIView):
+        try:
+
+            serializer.save()
+
+        except IntegrityError as e:
+
+            error_message = str(e)
+
+            # ------------------------------------------------
+            # DUPLICATE PHONE
+            # ------------------------------------------------
+
+            if "unique_phone_within_role_group" in error_message:
+
+                from rest_framework.exceptions import ValidationError
+
+                raise ValidationError(
+                    {
+                        "phone":
+                        "Phone number already taken. "
+                        "Please use a different number."
+                    }
+                )
+
+            # ------------------------------------------------
+            # DUPLICATE USERNAME
+            # ------------------------------------------------
+
+            if (
+                "username" in error_message
+                or "accounts_user.username" in error_message
+            ):
+
+                from rest_framework.exceptions import ValidationError
+
+                raise ValidationError(
+                    {
+                        "username":
+                        "Username already taken. "
+                        "Please choose a different username."
+                    }
+                )
+
+            raise
+
+
+class WorkerDetailView(
+    generics.RetrieveUpdateDestroyAPIView
+):
+
     serializer_class = WorkerUpdateSerializer
-    permission_classes = [IsAdminUserRole]
+
+    permission_classes = [
+        IsAdminUserRole
+    ]
 
     def get_queryset(self):
+
         return User.objects.filter(
             role=User.Role.WORKER,
             company_id=self.request.user.company_id,
         )
 
-    def perform_destroy(self, instance):
+    def perform_destroy(
+        self,
+        instance
+    ):
+
         instance.delete()
+
 
 # ============================================================
 # SERVICE REQUESTS
@@ -505,17 +582,25 @@ class ServiceRequestListCreateView(
 
         if user.role == User.Role.CUSTOMER:
 
-            company_id = self.request.data.get("company_id")
+            company_id = self.request.data.get(
+                "company_id"
+            )
 
             if not company_id:
+
                 raise serializers.ValidationError({
                     "company_id":
                     "Please select a company or branch."
                 })
 
             try:
-                company = Company.objects.get(id=company_id)
+
+                company = Company.objects.get(
+                    id=company_id
+                )
+
             except Company.DoesNotExist:
+
                 raise serializers.ValidationError({
                     "company_id":
                     "Selected company or branch does not exist."
@@ -529,40 +614,57 @@ class ServiceRequestListCreateView(
             )
 
             if last_request:
+
                 try:
+
                     last_number = int(
-                        last_request.request_number.split("-")[-1]
+                        last_request
+                        .request_number
+                        .split("-")[-1]
                     )
-                except (ValueError, AttributeError):
+
+                except (
+                    ValueError,
+                    AttributeError,
+                ):
+
                     last_number = 0
+
             else:
+
                 last_number = 0
 
-            request_number = f"SR-{last_number + 1:04d}"
+            request_number = (
+                f"SR-{last_number + 1:04d}"
+            )
 
             service_request = serializer.save(
-                    request_number=request_number,
-                    customer=user,
-                    company=company,
-                )
+                request_number=request_number,
+                customer=user,
+                company=company,
+            )
 
             customer_display_name = (
-                    user.name.strip()
-                    if user.name and user.name.strip()
-                    else user.username
-                )
+                user.name.strip()
+                if user.name and user.name.strip()
+                else user.username
+            )
 
             create_company_admin_notifications(
-                    company=company,
-                    notification_type=Notification.NotificationType.SERVICE_REQUEST,
-                    title="New service request",
-                    message=(
-                        f"{service_request.request_number} "
-                        f"has been submitted by {customer_display_name}."
-                    ),
-                )
+                company=company,
+                notification_type=(
+                    Notification.NotificationType.SERVICE_REQUEST
+                ),
+                title="New service request",
+                message=(
+                    f"{service_request.request_number} "
+                    f"has been submitted by "
+                    f"{customer_display_name}."
+                ),
+            )
 
         else:
+
             serializer.save()
 
 
@@ -598,10 +700,6 @@ class MyServiceRequestListView(
             "-created_at"
         )
 
-
-# ============================================================
-# SERVICE REQUEST DETAIL
-# ============================================================
 
 # ============================================================
 # SERVICE REQUEST DETAIL
@@ -1172,71 +1270,76 @@ class WorkEvidenceListCreateView(
         return queryset.order_by(
             "-created_at"
         )
-def perform_create(self, serializer):
 
-    user = self.request.user
+    def perform_create(
+        self,
+        serializer
+    ):
 
-    if user.role != User.Role.WORKER:
+        user = self.request.user
 
-        from rest_framework.exceptions import (
-            PermissionDenied,
-        )
-
-        raise PermissionDenied(
-            "Only workers can upload work evidence."
-        )
-
-    work_order = serializer.validated_data[
-        "work_order"
-    ]
-
-    if work_order.worker_id != user.id:
-
-        from rest_framework.exceptions import (
-            PermissionDenied,
-        )
-
-        raise PermissionDenied(
-            "You can only upload evidence for your assigned work orders."
-        )
-
-    # ----------------------------------------------------
-    # CHECK PLATFORM UPLOAD SIZE LIMIT
-    # ----------------------------------------------------
-
-    uploaded_file = serializer.validated_data.get(
-        "file"
-    )
-
-    if uploaded_file:
-
-        settings = PlatformSettings.get_settings()
-
-        max_size = (
-            settings.max_upload_size_mb
-            * 1024
-            * 1024
-        )
-
-        if uploaded_file.size > max_size:
+        if user.role != User.Role.WORKER:
 
             from rest_framework.exceptions import (
-                ValidationError,
+                PermissionDenied,
             )
 
-            raise ValidationError(
-                {
-                    "file": (
-                        f"File size cannot exceed "
-                        f"{settings.max_upload_size_mb} MB."
-                    )
-                }
+            raise PermissionDenied(
+                "Only workers can upload work evidence."
             )
 
-    serializer.save(
-        uploaded_by=user,
-        company=user.company,
-    )
+        work_order = serializer.validated_data[
+            "work_order"
+        ]
+
+        if work_order.worker_id != user.id:
+
+            from rest_framework.exceptions import (
+                PermissionDenied,
+            )
+
+            raise PermissionDenied(
+                "You can only upload evidence for your assigned work orders."
+            )
+
+        # ----------------------------------------------------
+        # CHECK PLATFORM UPLOAD SIZE LIMIT
+        # ----------------------------------------------------
+
+        uploaded_file = serializer.validated_data.get(
+            "file"
+        )
+
+        if uploaded_file:
+
+            settings = PlatformSettings.get_settings()
+
+            max_size = (
+                settings.max_upload_size_mb
+                * 1024
+                * 1024
+            )
+
+            if uploaded_file.size > max_size:
+
+                from rest_framework.exceptions import (
+                    ValidationError,
+                )
+
+                raise ValidationError(
+                    {
+                        "file": (
+                            f"File size cannot exceed "
+                            f"{settings.max_upload_size_mb} MB."
+                        )
+                    }
+                )
+
+        serializer.save(
+            uploaded_by=user,
+            company=user.company,
+        )
+
 
 # ============================================================
 # WORK ORDER ACTIONS
@@ -1272,8 +1375,12 @@ class WorkOrderActionView(APIView):
         if user.role == User.Role.ADMIN:
 
             if work_order.company_id != user.company_id:
+
                 return Response(
-                    {"detail": "You do not have access to this work order."},
+                    {
+                        "detail":
+                        "You do not have access to this work order."
+                    },
                     status=status.HTTP_403_FORBIDDEN,
                 )
 
@@ -1283,22 +1390,34 @@ class WorkOrderActionView(APIView):
                 work_order.company_id != user.company_id
                 or work_order.worker_id != user.id
             ):
+
                 return Response(
-                    {"detail": "You do not have access to this work order."},
+                    {
+                        "detail":
+                        "You do not have access to this work order."
+                    },
                     status=status.HTTP_403_FORBIDDEN,
                 )
 
         elif user.role == User.Role.CUSTOMER:
 
             if work_order.service_request.customer_id != user.id:
+
                 return Response(
-                    {"detail": "You do not have access to this work order."},
+                    {
+                        "detail":
+                        "You do not have access to this work order."
+                    },
                     status=status.HTTP_403_FORBIDDEN,
                 )
 
         else:
+
             return Response(
-                {"detail": "You do not have access to this work order."},
+                {
+                    "detail":
+                    "You do not have access to this work order."
+                },
                 status=status.HTTP_403_FORBIDDEN,
             )
 
@@ -1706,11 +1825,14 @@ class NotificationListView(
             User.Role.ADMIN,
             User.Role.WORKER,
         ):
+
             queryset = queryset.filter(
                 company_id=user.company_id
             )
 
-        return queryset.order_by("-created_at")
+        return queryset.order_by(
+            "-created_at"
+        )
 
 
 class NotificationReadView(
@@ -1734,6 +1856,7 @@ class NotificationReadView(
                 User.Role.ADMIN,
                 User.Role.WORKER,
             ) and notification.company_id != request.user.company_id:
+
                 raise Notification.DoesNotExist
 
         except Notification.DoesNotExist:
@@ -2141,10 +2264,6 @@ class CustomerDashboardView(
 # CURRENT USER
 # ============================================================
 
-# ============================================================
-# CURRENT USER
-# ============================================================
-
 class CurrentUserView(
     APIView
 ):
@@ -2219,34 +2338,78 @@ class CurrentUserView(
             }
         )
 
-class CustomerProfileUpdateView(APIView):
-    permission_classes = [IsAuthenticated]
 
-    def patch(self, request):
+# ============================================================
+# CUSTOMER PROFILE
+# ============================================================
+
+class CustomerProfileUpdateView(
+    APIView
+):
+
+    permission_classes = [
+        IsAuthenticated
+    ]
+
+    def patch(
+        self,
+        request
+    ):
+
         user = request.user
 
         if user.role != User.Role.CUSTOMER:
+
             return Response(
                 {
                     "success": False,
-                    "message": "Only customers can update their profile.",
+                    "message":
+                    "Only customers can update their profile.",
                 },
                 status=status.HTTP_403_FORBIDDEN,
             )
 
-        name = request.data.get("name", user.name)
-        email = request.data.get("email", user.email)
-        phone = request.data.get("phone", user.phone)
-        address = request.data.get("address", user.address)
+        name = request.data.get(
+            "name",
+            user.name
+        )
 
-        # Clean values
+        email = request.data.get(
+            "email",
+            user.email
+        )
+
+        phone = request.data.get(
+            "phone",
+            user.phone
+        )
+
+        address = request.data.get(
+            "address",
+            user.address
+        )
+
+        # ----------------------------------------------------
+        # CLEAN VALUES
+        # ----------------------------------------------------
+
         name = str(name).strip()
         email = str(email).strip()
         phone = str(phone).strip()
         address = str(address).strip()
 
-        # Name validation
+        # ----------------------------------------------------
+        # STORE OLD PHONE BEFORE CHANGING IT
+        # ----------------------------------------------------
+
+        old_phone = user.phone
+
+        # ----------------------------------------------------
+        # NAME VALIDATION
+        # ----------------------------------------------------
+
         if not name:
+
             return Response(
                 {
                     "success": False,
@@ -2255,38 +2418,57 @@ class CustomerProfileUpdateView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # Email validation
-            # Email validation
-            if email and not re.match(r"^\S+@\S+\.\S+$", email):
-                return Response(
-                    {
-                        "success": False,
-                        "message": "Please enter a valid email address.",
-                    },
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
+        # ----------------------------------------------------
+        # EMAIL VALIDATION
+        # ----------------------------------------------------
 
-        # Phone validation
-        if not phone.isdigit() or len(phone) != 10:
+        if email and not re.match(
+            r"^\S+@\S+\.\S+$",
+            email
+        ):
+
             return Response(
                 {
                     "success": False,
-                    "message": "Please enter a valid 10-digit mobile number.",
+                    "message":
+                    "Please enter a valid email address.",
                 },
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # Customer phone uniqueness
+        # ----------------------------------------------------
+        # PHONE VALIDATION
+        # ----------------------------------------------------
+
+        if not phone.isdigit() or len(phone) != 10:
+
+            return Response(
+                {
+                    "success": False,
+                    "message":
+                    "Please enter a valid 10-digit mobile number.",
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # ----------------------------------------------------
+        # CUSTOMER PHONE UNIQUENESS
+        # ----------------------------------------------------
+
         existing_customer = (
-            User.objects.filter(
+            User.objects
+            .filter(
                 phone=phone,
                 role=User.Role.CUSTOMER,
             )
-            .exclude(id=user.id)
+            .exclude(
+                id=user.id
+            )
             .first()
         )
 
         if existing_customer:
+
             return Response(
                 {
                     "success": False,
@@ -2298,14 +2480,21 @@ class CustomerProfileUpdateView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # Update profile
+        # ----------------------------------------------------
+        # UPDATE PROFILE
+        # ----------------------------------------------------
+
         user.name = name
         user.email = email
         user.phone = phone
         user.address = address
 
-        # If phone changes, require verification again
-        if phone != user.phone:
+        # ----------------------------------------------------
+        # IF PHONE CHANGES, REQUIRE VERIFICATION AGAIN
+        # ----------------------------------------------------
+
+        if phone != old_phone:
+
             user.phone_verified = False
 
         user.save(
@@ -2321,34 +2510,44 @@ class CustomerProfileUpdateView(APIView):
         return Response(
             {
                 "success": True,
-                "message": "Profile updated successfully.",
+                "message":
+                "Profile updated successfully.",
                 "user": {
                     "id": user.id,
                     "name": user.name,
                     "username": user.username,
                     "email": user.email,
                     "phone": user.phone,
-                    "phone_verified": user.phone_verified,
+                    "phone_verified":
+                    user.phone_verified,
                     "address": user.address,
                     "role": user.role,
-                    "company_id": user.company_id,
+                    "company_id":
+                    user.company_id,
                     "company_name": (
                         user.company.name
                         if user.company
                         else None
                     ),
-                    "employee_id": user.employee_id,
-                    "joining_date": user.joining_date,
-                    "availability": user.availability,
+                    "employee_id":
+                    user.employee_id,
+                    "joining_date":
+                    user.joining_date,
+                    "availability":
+                    user.availability,
                 },
             },
             status=status.HTTP_200_OK,
         )
+
+
 # ============================================================
 # WEBSOCKET TICKET
 # ============================================================
 
-class WSTicketView(APIView):
+class WSTicketView(
+    APIView
+):
 
     permission_classes = [
         IsAuthenticated
@@ -2361,7 +2560,8 @@ class WSTicketView(APIView):
 
         ticket = signing.dumps(
             {
-                "user_id": request.user.id,
+                "user_id":
+                request.user.id,
             }
         )
 
@@ -2373,11 +2573,14 @@ class WSTicketView(APIView):
             status=status.HTTP_200_OK,
         )
 
+
 # ============================================================
 # CHANGE PASSWORD
 # ============================================================
 
-class ChangePasswordView(APIView):
+class ChangePasswordView(
+    APIView
+):
 
     permission_classes = [
         IsAuthenticated
@@ -2405,6 +2608,7 @@ class ChangePasswordView(APIView):
         # ----------------------------------------------------
 
         if not current_password:
+
             return Response(
                 {
                     "detail":
@@ -2414,6 +2618,7 @@ class ChangePasswordView(APIView):
             )
 
         if not new_password:
+
             return Response(
                 {
                     "detail":
@@ -2423,6 +2628,7 @@ class ChangePasswordView(APIView):
             )
 
         if not confirm_password:
+
             return Response(
                 {
                     "detail":
@@ -2440,6 +2646,7 @@ class ChangePasswordView(APIView):
         if not user.check_password(
             current_password
         ):
+
             return Response(
                 {
                     "detail":
@@ -2453,6 +2660,7 @@ class ChangePasswordView(APIView):
         # ----------------------------------------------------
 
         if new_password != confirm_password:
+
             return Response(
                 {
                     "detail":
@@ -2468,6 +2676,7 @@ class ChangePasswordView(APIView):
         if user.check_password(
             new_password
         ):
+
             return Response(
                 {
                     "detail":
@@ -2481,6 +2690,7 @@ class ChangePasswordView(APIView):
         # ----------------------------------------------------
 
         if len(new_password) < 8:
+
             return Response(
                 {
                     "detail":
@@ -2512,11 +2722,14 @@ class ChangePasswordView(APIView):
             status=status.HTTP_200_OK,
         )
 
+
 # ============================================================
 # SEND PHONE OTP
 # ============================================================
 
-class SendPhoneOTPView(APIView):
+class SendPhoneOTPView(
+    APIView
+):
 
     permission_classes = [
         IsAuthenticated
@@ -2534,6 +2747,7 @@ class SendPhoneOTPView(APIView):
         )
 
         if not phone:
+
             return Response(
                 {
                     "detail":
@@ -2549,6 +2763,7 @@ class SendPhoneOTPView(APIView):
         phone = str(phone).strip()
 
         if not phone:
+
             return Response(
                 {
                     "detail":
@@ -2562,6 +2777,7 @@ class SendPhoneOTPView(APIView):
         # ----------------------------------------------------
 
         if not phone.isdigit():
+
             return Response(
                 {
                     "detail":
@@ -2571,6 +2787,7 @@ class SendPhoneOTPView(APIView):
             )
 
         if len(phone) != 10:
+
             return Response(
                 {
                     "detail":
@@ -2595,6 +2812,7 @@ class SendPhoneOTPView(APIView):
         )
 
         if existing_user:
+
             return Response(
                 {
                     "detail":
@@ -2611,6 +2829,7 @@ class SendPhoneOTPView(APIView):
             user.phone == phone
             and user.phone_verified
         ):
+
             return Response(
                 {
                     "detail":
@@ -2666,13 +2885,6 @@ class SendPhoneOTPView(APIView):
 
         # ----------------------------------------------------
         # DEVELOPMENT RESPONSE
-        #
-        # IMPORTANT:
-        # This OTP is returned only because we have not
-        # connected an SMS provider yet.
-        #
-        # In production this field will be removed and the
-        # OTP will be sent through SMS.
         # ----------------------------------------------------
 
         return Response(
@@ -2693,7 +2905,9 @@ class SendPhoneOTPView(APIView):
 # VERIFY PHONE OTP
 # ============================================================
 
-class VerifyPhoneOTPView(APIView):
+class VerifyPhoneOTPView(
+    APIView
+):
 
     permission_classes = [
         IsAuthenticated
@@ -2719,6 +2933,7 @@ class VerifyPhoneOTPView(APIView):
         # ----------------------------------------------------
 
         if not phone:
+
             return Response(
                 {
                     "detail":
@@ -2728,6 +2943,7 @@ class VerifyPhoneOTPView(APIView):
             )
 
         if not otp:
+
             return Response(
                 {
                     "detail":
@@ -2744,6 +2960,7 @@ class VerifyPhoneOTPView(APIView):
         # ----------------------------------------------------
 
         if not phone.isdigit():
+
             return Response(
                 {
                     "detail":
@@ -2753,6 +2970,7 @@ class VerifyPhoneOTPView(APIView):
             )
 
         if len(phone) != 10:
+
             return Response(
                 {
                     "detail":
@@ -2766,6 +2984,7 @@ class VerifyPhoneOTPView(APIView):
         # ----------------------------------------------------
 
         if not otp.isdigit():
+
             return Response(
                 {
                     "detail":
@@ -2775,6 +2994,7 @@ class VerifyPhoneOTPView(APIView):
             )
 
         if len(otp) != 6:
+
             return Response(
                 {
                     "detail":
@@ -2799,6 +3019,7 @@ class VerifyPhoneOTPView(APIView):
         )
 
         if existing_user:
+
             return Response(
                 {
                     "detail":
@@ -2826,6 +3047,7 @@ class VerifyPhoneOTPView(APIView):
         )
 
         if not phone_otp:
+
             return Response(
                 {
                     "detail":
@@ -2948,11 +3170,14 @@ class VerifyPhoneOTPView(APIView):
             status=status.HTTP_200_OK,
         )
 
+
 # ============================================================
 # SEND CHANGE PHONE OTP
 # ============================================================
 
-class SendChangePhoneOTPView(APIView):
+class SendChangePhoneOTPView(
+    APIView
+):
 
     permission_classes = [
         IsAuthenticated
@@ -3085,7 +3310,9 @@ class SendChangePhoneOTPView(APIView):
 # VERIFY CHANGE PHONE OTP
 # ============================================================
 
-class VerifyChangePhoneOTPView(APIView):
+class VerifyChangePhoneOTPView(
+    APIView
+):
 
     permission_classes = [
         IsAuthenticated
@@ -3201,6 +3428,7 @@ class VerifyChangePhoneOTPView(APIView):
         if timezone.now() > phone_otp.expires_at:
 
             phone_otp.is_used = True
+
             phone_otp.save(
                 update_fields=[
                     "is_used"
@@ -3225,6 +3453,7 @@ class VerifyChangePhoneOTPView(APIView):
         if phone_otp.attempts >= 5:
 
             phone_otp.is_used = True
+
             phone_otp.save(
                 update_fields=[
                     "is_used"
@@ -3254,6 +3483,7 @@ class VerifyChangePhoneOTPView(APIView):
             phone_otp.attempts += 1
 
             if phone_otp.attempts >= 5:
+
                 phone_otp.is_used = True
 
             phone_otp.save(
@@ -3266,9 +3496,8 @@ class VerifyChangePhoneOTPView(APIView):
             return Response(
                 {
                     "success": False,
-                    "message": (
-                        "Incorrect OTP."
-                    ),
+                    "message":
+                    "Incorrect OTP.",
                 },
                 status=status.HTTP_400_BAD_REQUEST,
             )
@@ -3278,6 +3507,7 @@ class VerifyChangePhoneOTPView(APIView):
         # ----------------------------------------------------
 
         phone_otp.is_used = True
+
         phone_otp.save(
             update_fields=[
                 "is_used"
@@ -3309,11 +3539,14 @@ class VerifyChangePhoneOTPView(APIView):
             status=status.HTTP_200_OK,
         )
 
+
 # ============================================================
 # FORGOT PASSWORD - SEND OTP
 # ============================================================
 
-class SendForgotPasswordOTPView(APIView):
+class SendForgotPasswordOTPView(
+    APIView
+):
 
     permission_classes = []
 
@@ -3323,7 +3556,10 @@ class SendForgotPasswordOTPView(APIView):
     ):
 
         phone = str(
-            request.data.get("phone", "")
+            request.data.get(
+                "phone",
+                ""
+            )
         ).strip()
 
         if not phone.isdigit() or len(phone) != 10:
@@ -3331,7 +3567,8 @@ class SendForgotPasswordOTPView(APIView):
             return Response(
                 {
                     "success": False,
-                    "message": "Enter a valid 10-digit phone number.",
+                    "message":
+                    "Enter a valid 10-digit phone number.",
                 },
                 status=status.HTTP_400_BAD_REQUEST,
             )
@@ -3348,7 +3585,8 @@ class SendForgotPasswordOTPView(APIView):
             return Response(
                 {
                     "success": False,
-                    "message": "No verified account found for this phone number.",
+                    "message":
+                    "No verified account found for this phone number.",
                 },
                 status=status.HTTP_404_NOT_FOUND,
             )
@@ -3371,16 +3609,21 @@ class SendForgotPasswordOTPView(APIView):
         PhoneOTP.objects.create(
             user=user,
             phone=phone,
-            code_hash=make_password(otp),
+            code_hash=make_password(
+                otp
+            ),
             purpose=PhoneOTP.Purpose.PASSWORD_RESET,
             expires_at=timezone.now()
-            + timezone.timedelta(minutes=10),
+            + timezone.timedelta(
+                minutes=10
+            ),
         )
 
         return Response(
             {
                 "success": True,
-                "message": "Password reset OTP generated successfully.",
+                "message":
+                "Password reset OTP generated successfully.",
                 "expires_in": 600,
 
                 # DEVELOPMENT ONLY.
@@ -3395,7 +3638,9 @@ class SendForgotPasswordOTPView(APIView):
 # FORGOT PASSWORD - RESET PASSWORD
 # ============================================================
 
-class ForgotPasswordResetView(APIView):
+class ForgotPasswordResetView(
+    APIView
+):
 
     permission_classes = []
 
@@ -3405,15 +3650,24 @@ class ForgotPasswordResetView(APIView):
     ):
 
         phone = str(
-            request.data.get("phone", "")
+            request.data.get(
+                "phone",
+                ""
+            )
         ).strip()
 
         otp = str(
-            request.data.get("otp", "")
+            request.data.get(
+                "otp",
+                ""
+            )
         ).strip()
 
         new_password = str(
-            request.data.get("new_password", "")
+            request.data.get(
+                "new_password",
+                ""
+            )
         )
 
         if not phone.isdigit() or len(phone) != 10:
@@ -3421,7 +3675,8 @@ class ForgotPasswordResetView(APIView):
             return Response(
                 {
                     "success": False,
-                    "message": "Enter a valid 10-digit phone number.",
+                    "message":
+                    "Enter a valid 10-digit phone number.",
                 },
                 status=status.HTTP_400_BAD_REQUEST,
             )
@@ -3431,7 +3686,8 @@ class ForgotPasswordResetView(APIView):
             return Response(
                 {
                     "success": False,
-                    "message": "Enter a valid 6-digit OTP.",
+                    "message":
+                    "Enter a valid 6-digit OTP.",
                 },
                 status=status.HTTP_400_BAD_REQUEST,
             )
@@ -3441,7 +3697,8 @@ class ForgotPasswordResetView(APIView):
             return Response(
                 {
                     "success": False,
-                    "message": "Password must be at least 8 characters.",
+                    "message":
+                    "Password must be at least 8 characters.",
                 },
                 status=status.HTTP_400_BAD_REQUEST,
             )
@@ -3456,7 +3713,8 @@ class ForgotPasswordResetView(APIView):
             return Response(
                 {
                     "success": False,
-                    "message": "Invalid phone number.",
+                    "message":
+                    "Invalid phone number.",
                 },
                 status=status.HTTP_400_BAD_REQUEST,
             )
@@ -3478,7 +3736,8 @@ class ForgotPasswordResetView(APIView):
             return Response(
                 {
                     "success": False,
-                    "message": "OTP not found. Please request a new OTP.",
+                    "message":
+                    "OTP not found. Please request a new OTP.",
                 },
                 status=status.HTTP_400_BAD_REQUEST,
             )
@@ -3486,14 +3745,18 @@ class ForgotPasswordResetView(APIView):
         if phone_otp.expires_at < timezone.now():
 
             phone_otp.is_used = True
+
             phone_otp.save(
-                update_fields=["is_used"]
+                update_fields=[
+                    "is_used"
+                ]
             )
 
             return Response(
                 {
                     "success": False,
-                    "message": "OTP has expired. Please request a new OTP.",
+                    "message":
+                    "OTP has expired. Please request a new OTP.",
                 },
                 status=status.HTTP_400_BAD_REQUEST,
             )
@@ -3501,14 +3764,18 @@ class ForgotPasswordResetView(APIView):
         if phone_otp.attempts >= 5:
 
             phone_otp.is_used = True
+
             phone_otp.save(
-                update_fields=["is_used"]
+                update_fields=[
+                    "is_used"
+                ]
             )
 
             return Response(
                 {
                     "success": False,
-                    "message": "Too many incorrect attempts. Please request a new OTP.",
+                    "message":
+                    "Too many incorrect attempts. Please request a new OTP.",
                 },
                 status=status.HTTP_400_BAD_REQUEST,
             )
@@ -3521,6 +3788,7 @@ class ForgotPasswordResetView(APIView):
             phone_otp.attempts += 1
 
             if phone_otp.attempts >= 5:
+
                 phone_otp.is_used = True
 
             phone_otp.save(
@@ -3533,7 +3801,8 @@ class ForgotPasswordResetView(APIView):
             return Response(
                 {
                     "success": False,
-                    "message": "Invalid OTP.",
+                    "message":
+                    "Invalid OTP.",
                 },
                 status=status.HTTP_400_BAD_REQUEST,
             )
@@ -3560,7 +3829,8 @@ class ForgotPasswordResetView(APIView):
         return Response(
             {
                 "success": True,
-                "message": "Password reset successfully.",
+                "message":
+                "Password reset successfully.",
             },
             status=status.HTTP_200_OK,
         )
