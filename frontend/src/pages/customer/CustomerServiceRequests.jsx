@@ -466,19 +466,18 @@ const CustomerServiceRequests = () => {
                     address:
                         formData.address.trim(),
 
-                    location_latitude:
-                        formData.location_latitude
-                            ? Number(
-                                formData.location_latitude
-                            )
-                            : null,
 
-                    location_longitude:
-                        formData.location_longitude
-                            ? Number(
-                                formData.location_longitude
-                            )
-                            : null,
+location_latitude:
+    formData.location_latitude !== ""
+        && formData.location_latitude !== null
+        ? Number(Number(formData.location_latitude).toFixed(6))
+        : null,
+
+location_longitude:
+    formData.location_longitude !== ""
+        && formData.location_longitude !== null
+        ? Number(Number(formData.location_longitude).toFixed(6))
+        : null,
                 }
             );
 
