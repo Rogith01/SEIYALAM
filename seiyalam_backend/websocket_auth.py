@@ -15,7 +15,7 @@ def get_user_from_ticket(ticket):
 
         data = signing.loads(
             ticket,
-            max_age=60,
+            max_age=300,
         )
 
         user_id = data.get(
