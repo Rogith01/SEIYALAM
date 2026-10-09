@@ -238,9 +238,9 @@ function AdminLayout({ children }) {
 
   const getWebSocketTicket = async () => {
 
-    const response = await api.post(
-      "/ws-ticket/"
-    );
+      const response = await api.post(
+        "/auth/ws-ticket/"
+      );
 
     return response.data.ticket;
 

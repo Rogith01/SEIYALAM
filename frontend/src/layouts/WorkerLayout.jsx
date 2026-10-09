@@ -216,7 +216,7 @@ function WorkerLayout({ children }) {
   const getWebSocketTicket = async () => {
 
     const response = await api.post(
-      "/ws-ticket/"
+      "/auth/ws-ticket/"
     );
 
     return response.data.ticket;

@@ -124,7 +124,7 @@ const CustomerLayout = ({ children }) => {
     const connectWebSocket = async () => {
       try {
         const tokenResponse = await api.post(
-          "/ws-ticket/"
+          "/auth/ws-ticket/"
         );
 
         const ticket = tokenResponse.data.ticket;
