@@ -513,53 +513,38 @@ class WorkerDetailView(
 # SERVICE REQUESTS
 # ============================================================
 
-class ServiceRequestListCreateView(
-    generics.ListCreateAPIView
-):
+class ServiceRequestListCreateView(generics.ListCreateAPIView):
 
     serializer_class = ServiceRequestSerializer
 
     def get_queryset(self):
-
         user = self.request.user
 
         queryset = ServiceRequest.objects.all()
 
         if user.role == User.Role.ADMIN:
-
             queryset = queryset.filter(
                 company_id=user.company_id
             )
 
         elif user.role == User.Role.WORKER:
-
             queryset = queryset.filter(
                 company_id=user.company_id,
                 work_order__worker=user,
             )
 
         elif user.role == User.Role.CUSTOMER:
-
             queryset = queryset.filter(
                 customer=user
             )
 
         else:
-
             return ServiceRequest.objects.none()
 
-        search = self.request.query_params.get(
-            "search"
-        )
-
-        request_status = (
-            self.request.query_params.get(
-                "status"
-            )
-        )
+        search = self.request.query_params.get("search")
+        request_status = self.request.query_params.get("status")
 
         if search:
-
             queryset = queryset.filter(
                 Q(request_number__icontains=search)
                 | Q(title__icontains=search)
@@ -567,45 +552,29 @@ class ServiceRequestListCreateView(
             )
 
         if request_status:
+            queryset = queryset.filter(status=request_status)
 
-            queryset = queryset.filter(
-                status=request_status
-            )
-
-        return queryset.distinct().order_by(
-            "-created_at"
-        )
+        return queryset.distinct().order_by("-created_at")
 
     def perform_create(self, serializer):
-
         user = self.request.user
 
         if user.role == User.Role.CUSTOMER:
-
-            company_id = self.request.data.get(
-                "company_id"
-            )
+            company_id = self.request.data.get("company_id")
 
             if not company_id:
-
                 raise serializers.ValidationError({
-                    "company_id":
-                    "Please select a company or branch."
+                    "company_id": "Please select a company or branch."
                 })
 
             try:
-
-                company = Company.objects.get(
-                    id=company_id
-                )
-
-            except Company.DoesNotExist:
-
+                company = Company.objects.get(id=company_id)
+            except (Company.DoesNotExist, ValueError, TypeError):
                 raise serializers.ValidationError({
-                    "company_id":
-                    "Selected company or branch does not exist."
+                    "company_id": "Selected company or branch does not exist."
                 })
 
+            # Find the latest request number for this company.
             last_request = (
                 ServiceRequest.objects
                 .filter(company=company)
@@ -613,30 +582,25 @@ class ServiceRequestListCreateView(
                 .first()
             )
 
-            if last_request:
+            last_number = 0
 
+            if last_request and last_request.request_number:
                 try:
-
                     last_number = int(
-                        last_request
-                        .request_number
-                        .split("-")[-1]
+                        last_request.request_number.split("-")[-1]
                     )
-
-                except (
-                    ValueError,
-                    AttributeError,
-                ):
-
+                except (ValueError, AttributeError):
                     last_number = 0
 
-            else:
+            # Generate a request number that is not already in use.
+            while True:
+                last_number += 1
+                request_number = f"SR-{last_number:04d}"
 
-                last_number = 0
-
-            request_number = (
-                f"SR-{last_number + 1:04d}"
-            )
+                if not ServiceRequest.objects.filter(
+                    request_number=request_number
+                ).exists():
+                    break
 
             service_request = serializer.save(
                 request_number=request_number,
@@ -664,9 +628,7 @@ class ServiceRequestListCreateView(
             )
 
         else:
-
             serializer.save()
-
 
 class MyServiceRequestListView(
     generics.ListAPIView
