@@ -495,23 +495,29 @@ const CustomerServiceRequests = () => {
             setShowModal(false);
 
             await fetchRequests();
-
         } catch (err) {
-
             console.error(
                 "Failed to create service request:",
-                err
+                err?.response?.status,
+                err?.response?.data || err
             );
 
-            alert(
-                err?.response?.data?.detail ||
-                "Failed to create service request."
-            );
+            const data = err?.response?.data;
 
+            const message = data
+                ? typeof data === "string"
+                    ? data
+                    : data.error ||
+                    data.detail ||
+                    data.company_id ||
+                    data.title ||
+                    data.description ||
+                    JSON.stringify(data)
+                : err?.message || "Network error. Please try again.";
+
+            alert(`Failed to create request: ${message}`);
         } finally {
-
             setSubmitting(false);
-
         }
     };
 
