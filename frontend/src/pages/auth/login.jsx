@@ -89,43 +89,50 @@ function Login() {
     });
   };
 
-  const handleSubmit = async (event) => {
-    event.preventDefault();
 
-    setError("");
+const handleSubmit = async (event) => {
+  event.preventDefault();
+  setError("");
 
-    if (!formData.username || !formData.password) {
-      setError("Please enter username and password.");
-      return;
-    }
+  if (!formData.username.trim() || !formData.password) {
+    setError("Please enter username and password.");
+    return;
+  }
 
-    try {
-      setLoading(true);
+  try {
+    setLoading(true);
 
-      const currentUser = await login(
-        formData.username,
-        formData.password
+    const currentUser = await login(
+      formData.username,
+      formData.password
+    );
+
+    // Redirect according to the authenticated user's role
+    if (currentUser.role === "FOUNDER") {
+      navigate("/founder/dashboard", { replace: true });
+    } else if (currentUser.role === "ADMIN") {
+      navigate("/admin/dashboard", { replace: true });
+    } else if (currentUser.role === "WORKER") {
+      navigate("/worker/dashboard", { replace: true });
+    } else if (currentUser.role === "CUSTOMER") {
+      navigate("/customer/dashboard", { replace: true });
+    } else {
+      setError(
+        `Login succeeded, but the role "${currentUser.role}" is not recognized.`
       );
-
-      if (currentUser.role === "ADMIN") {
-        navigate("/admin/dashboard");
-      } else if (currentUser.role === "WORKER") {
-        navigate("/worker/dashboard");
-      } else if (currentUser.role === "CUSTOMER") {
-        navigate("/customer/dashboard");
-      }
-    } catch (err) {
-      const message =
-        err.response?.data?.error?.detail ||
-        err.response?.data?.detail ||
-        err.response?.data?.message ||
-        "Invalid username or password.";
-
-      setError(message);
-    } finally {
-      setLoading(false);
     }
-  };
+  } catch (err) {
+    const message =
+      err.response?.data?.error?.detail ||
+      err.response?.data?.detail ||
+      err.response?.data?.message ||
+      "Invalid username or password.";
+
+    setError(message);
+  } finally {
+    setLoading(false);
+  }
+};
 
   // ============================================================
   // CUSTOMER REGISTRATION
