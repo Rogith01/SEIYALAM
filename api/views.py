@@ -75,6 +75,7 @@ from .permissions import (
 # HELPERS
 # ============================================================
 
+
 def create_notification(
     recipient,
     company,
@@ -89,6 +90,21 @@ def create_notification(
         title=title,
         message=message,
     )
+
+    # Send the saved notification to this user's
+    # connected WebSocket clients.
+    channel_layer = get_channel_layer()
+
+    if channel_layer is not None:
+        async_to_sync(channel_layer.group_send)(
+            f"user_{recipient.id}",
+            {
+                "type": "notification_message",
+                "notification": dict(
+                    NotificationSerializer(notification).data
+                ),
+            },
+        )
 
     return notification
 
@@ -964,6 +980,17 @@ class WorkOrderListCreateView(
             company=user.company,
             work_order_number=work_order_number,
         )
+        
+        create_notification(
+                recipient=worker,
+                company=user.company,
+                notification_type=Notification.NotificationType.WORK_ORDER,
+                title="New work assigned",
+                message=(
+                    f"{work_order.work_order_number} has been assigned to you "
+                    f"for service request {service_request.request_number}."
+                ),
+            )
 
         service_request.status = (
             ServiceRequest.Status.ASSIGNED
