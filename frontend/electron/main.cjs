@@ -1,27 +1,29 @@
 const { app, BrowserWindow } = require("electron");
-const path = require("path");
+const path = require("node:path");
 
 function createWindow() {
+const iconPath = path.join(app.getAppPath(), "build", "sei.ico");
+
 const win = new BrowserWindow({
 width: 1400,
 height: 900,
 minWidth: 1000,
 minHeight: 700,
 title: "SEIYALAM",
+icon: iconPath,
 autoHideMenuBar: true,
 webPreferences: {
 nodeIntegration: false,
 contextIsolation: true,
 sandbox: true,
-devTools: false,
-},
+devTools: false
+}
 });
 
 if (app.isPackaged) {
 win.loadFile(path.join(__dirname, "../dist/index.html"));
 } else {
 win.loadURL("http://localhost:5173");
-
 }
 }
 

@@ -38,3 +38,5 @@ htmlcov/
 # Node.js
 node_modules/
 
+
+frontend/release-new/
