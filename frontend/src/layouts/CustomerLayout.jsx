@@ -1,5 +1,5 @@
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { NavLink, useNavigate } from "react-router-dom";
 import {
   LayoutDashboard,
@@ -15,6 +15,9 @@ import {
   CheckCheck,
   RefreshCw,
   ExternalLink,
+  ChevronDown,
+  CircleUserRound,
+  Settings,
 } from "lucide-react";
 import { useAuth } from "../context/AuthContext";
 import api from "../services/api";
@@ -58,6 +61,8 @@ const CustomerLayout = ({ children }) => {
   const navigate = useNavigate();
 
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [profileMenuOpen, setProfileMenuOpen] = useState(false);
+  const profileMenuRef = useRef(null);
   const [notifications, setNotifications] = useState([]);
   const [notificationOpen, setNotificationOpen] = useState(false);
   const [notificationLoading, setNotificationLoading] = useState(false);
@@ -91,6 +96,17 @@ const CustomerLayout = ({ children }) => {
       setNotificationLoading(false);
     }
   };
+
+  // Close profile dropdown when clicking outside.
+  useEffect(() => {
+    const handleProfileClickOutside = (event) => {
+      if (profileMenuRef.current && !profileMenuRef.current.contains(event.target)) {
+        setProfileMenuOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handleProfileClickOutside);
+    return () => document.removeEventListener("mousedown", handleProfileClickOutside);
+  }, []);
 
   /*
    * WEBSOCKET CONNECTION
@@ -545,16 +561,48 @@ const CustomerLayout = ({ children }) => {
               )}
             </div>
 
-            {/* User */}
-            <div className="hidden text-right sm:block">
-              <p className="text-sm font-semibold text-slate-800">
-                {user?.username || "Customer"}
-              </p>
-              <p className="text-xs text-slate-500">Customer</p>
-            </div>
+            {/* Profile dropdown */}
+            <div className="relative" ref={profileMenuRef}>
+              <button
+                type="button"
+                onClick={() => setProfileMenuOpen((open) => !open)}
+                aria-expanded={profileMenuOpen}
+                aria-haspopup="menu"
+                className="flex items-center gap-2 rounded-xl p-1.5 text-left transition hover:bg-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-500"
+              >
+                <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-blue-100 text-blue-700">
+                  <User size={18} />
+                </div>
+                <div className="hidden text-right sm:block">
+                  <p className="max-w-32 truncate text-sm font-semibold text-slate-800">{user?.username || "Customer"}</p>
+                  <p className="text-xs text-slate-500">Customer account</p>
+                </div>
+                <ChevronDown size={16} className={`text-slate-500 transition ${profileMenuOpen ? "rotate-180" : ""}`} />
+              </button>
 
-            <div className="flex h-9 w-9 items-center justify-center rounded-full bg-blue-100 text-blue-700">
-              <User size={18} />
+              {profileMenuOpen && (
+                <div role="menu" className="absolute right-0 top-full z-50 mt-2 w-72 overflow-hidden rounded-xl border border-slate-200 bg-white py-2 shadow-xl">
+                  <div className="flex items-center gap-3 border-b border-slate-100 px-4 py-3">
+                    <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-blue-50 text-blue-700"><CircleUserRound size={22} /></div>
+                    <div className="min-w-0">
+                      <p className="truncate text-sm font-semibold text-slate-800">{user?.username || "Customer"}</p>
+                      <p className="text-xs text-slate-500">Customer account</p>
+                    </div>
+                  </div>
+                  <button type="button" role="menuitem" onClick={() => { setProfileMenuOpen(false); navigate("/customer/profile"); }} className="flex w-full items-center gap-3 px-4 py-3 text-left transition hover:bg-slate-50">
+                    <CircleUserRound size={18} className="text-slate-500" />
+                    <span><span className="block text-sm font-medium text-slate-800">Manage Profile</span><span className="mt-0.5 block text-xs text-slate-500">View or update account details</span></span>
+                  </button>
+                  <button type="button" role="menuitem" onClick={() => { setProfileMenuOpen(false); navigate("/customer/profile"); }} className="flex w-full items-center gap-3 px-4 py-3 text-left transition hover:bg-slate-50">
+                    <Settings size={18} className="text-slate-500" />
+                    <span><span className="block text-sm font-medium text-slate-800">Account Settings</span><span className="mt-0.5 block text-xs text-slate-500">Manage your preferences</span></span>
+                  </button>
+                  <div className="my-1 border-t border-slate-100" />
+                  <button type="button" role="menuitem" onClick={() => { setProfileMenuOpen(false); handleLogout(); }} className="flex w-full items-center gap-3 px-4 py-3 text-left text-red-600 transition hover:bg-red-50">
+                    <LogOut size={18} /><span className="text-sm font-medium">Logout</span>
+                  </button>
+                </div>
+              )}
             </div>
           </div>
         </header>

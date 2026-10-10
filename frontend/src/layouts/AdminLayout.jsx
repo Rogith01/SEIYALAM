@@ -14,6 +14,9 @@ import {
   FileText,
   Check,
   ExternalLink,
+  ChevronDown,
+  CircleUserRound,
+  Settings,
 } from "lucide-react";
 
 import {
@@ -44,6 +47,9 @@ function AdminLayout({ children }) {
 
   const [sidebarOpen, setSidebarOpen] =
     useState(false);
+
+  const [profileMenuOpen, setProfileMenuOpen] = useState(false);
+  const profileMenuRef = useRef(null);
 
   // ========================================================
   // NOTIFICATION STATE
@@ -698,6 +704,23 @@ function AdminLayout({ children }) {
   }, []);
 
 
+  // Close the profile menu when clicking outside it.
+  useEffect(() => {
+    const handleProfileClickOutside = (event) => {
+      if (
+        profileMenuRef.current &&
+        !profileMenuRef.current.contains(event.target)
+      ) {
+        setProfileMenuOpen(false);
+      }
+    };
+
+    document.addEventListener("mousedown", handleProfileClickOutside);
+    return () => {
+      document.removeEventListener("mousedown", handleProfileClickOutside);
+    };
+  }, []);
+
   // ========================================================
   // UNREAD COUNT
   // ========================================================
@@ -1343,36 +1366,89 @@ function AdminLayout({ children }) {
             <div className="hidden h-6 w-px bg-slate-200 sm:block" />
 
 
-            {/* User */}
+            {/* Profile dropdown */}
+            <div className="relative" ref={profileMenuRef}>
+              <button
+                type="button"
+                onClick={() => setProfileMenuOpen((open) => !open)}
+                aria-expanded={profileMenuOpen}
+                aria-haspopup="menu"
+                className="flex items-center gap-2 rounded-xl p-1.5 text-left transition hover:bg-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-500"
+              >
+                <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-slate-800 text-sm font-semibold text-white">
+                  {user?.username?.charAt(0).toUpperCase() || "A"}
+                </div>
+                <div className="hidden sm:block">
+                  <p className="max-w-32 truncate text-sm font-medium text-slate-800">
+                    {user?.username || "Admin"}
+                  </p>
+                  <p className="text-xs text-slate-400">Admin account</p>
+                </div>
+                <ChevronDown size={16} className={`hidden text-slate-500 transition sm:block ${profileMenuOpen ? "rotate-180" : ""}`} />
+              </button>
 
-            <div className="flex items-center gap-2">
+              {profileMenuOpen && (
+                <div
+                  role="menu"
+                  className="absolute right-0 top-full z-50 mt-2 w-72 overflow-hidden rounded-xl border border-slate-200 bg-white py-2 shadow-xl"
+                >
+                  <div className="flex items-center gap-3 border-b border-slate-100 px-4 py-3">
+                    <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-slate-100 text-slate-700">
+                      <CircleUserRound size={22} />
+                    </div>
+                    <div className="min-w-0">
+                      <p className="truncate text-sm font-semibold text-slate-800">{user?.username || "Admin"}</p>
+                      <p className="text-xs text-slate-500">Admin account</p>
+                    </div>
+                  </div>
 
-              <div className="flex h-9 w-9 items-center justify-center rounded-full bg-slate-800 text-sm font-semibold text-white">
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      setProfileMenuOpen(false);
+                      handleNavigation("/admin/settings");
+                    }}
+                    className="flex w-full items-center gap-3 px-4 py-3 text-left transition hover:bg-slate-50"
+                  >
+                    <CircleUserRound size={18} className="text-slate-500" />
+                    <span>
+                      <span className="block text-sm font-medium text-slate-800">Manage Profile</span>
+                      <span className="mt-0.5 block text-xs text-slate-500">View or update account details</span>
+                    </span>
+                  </button>
 
-                {
-                  user?.username
-                    ?.charAt(0)
-                    .toUpperCase() || "A"
-                }
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      setProfileMenuOpen(false);
+                      handleNavigation("/admin/settings");
+                    }}
+                    className="flex w-full items-center gap-3 px-4 py-3 text-left transition hover:bg-slate-50"
+                  >
+                    <Settings size={18} className="text-slate-500" />
+                    <span>
+                      <span className="block text-sm font-medium text-slate-800">Account Settings</span>
+                      <span className="mt-0.5 block text-xs text-slate-500">Manage your preferences</span>
+                    </span>
+                  </button>
 
-              </div>
-
-
-              <div className="hidden sm:block">
-
-                <p className="text-sm font-medium text-slate-800">
-
-                  {user?.username || "Admin"}
-
-                </p>
-
-
-                <p className="text-xs text-slate-400">
-                  Admin
-                </p>
-
-              </div>
-
+                  <div className="my-1 border-t border-slate-100" />
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      setProfileMenuOpen(false);
+                      handleLogout();
+                    }}
+                    className="flex w-full items-center gap-3 px-4 py-3 text-left text-red-600 transition hover:bg-red-50"
+                  >
+                    <LogOut size={18} />
+                    <span className="text-sm font-medium">Logout</span>
+                  </button>
+                </div>
+              )}
             </div>
 
           </div>
