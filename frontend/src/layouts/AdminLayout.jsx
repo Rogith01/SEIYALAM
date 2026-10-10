@@ -1399,21 +1399,7 @@ function AdminLayout({ children }) {
                     </span>
                   </button>
 
-                  <button
-                    type="button"
-                    role="menuitem"
-                    onClick={() => {
-                      setProfileMenuOpen(false);
-                      handleNavigation("/admin/settings");
-                    }}
-                    className="flex w-full items-center gap-3 px-4 py-3 text-left transition hover:bg-slate-50"
-                  >
-                    <Settings size={18} className="text-slate-500" />
-                    <span>
-                      <span className="block text-sm font-medium text-slate-800">Account Settings</span>
-                      <span className="mt-0.5 block text-xs text-slate-500">Manage your preferences</span>
-                    </span>
-                  </button>
+
 
                   <div className="my-1 border-t border-slate-100" />
                   <button
