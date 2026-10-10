@@ -771,7 +771,7 @@ function Login() {
               Service Management Platform
             </p>
             <p className="mt-1 text-sm text-slate-400">
-              Login Page
+              LOGIN
             </p>
           </div>
 
