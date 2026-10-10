@@ -1,23 +1,4 @@
-import {
-  LayoutDashboard,
-  ClipboardList,
-  Briefcase,
-  Users,
-  UserRound,
-  BarChart3,
-  Bell,
-  Settings,
-  LogOut,
-  Menu,
-  X,
-  Wrench,
-  FileText,
-  Check,
-  ExternalLink,
-  ChevronDown,
-  CircleUserRound,
-  Settings,
-} from "lucide-react";
+import { LayoutDashboard, ClipboardList, Briefcase, Users, UserRound, BarChart3, Bell, Settings, LogOut, Menu, X, Wrench, FileText, Check, ExternalLink, ChevronDown, CircleUserRound } from "lucide-react";
 
 import {
   useEffect,
