@@ -6,6 +6,7 @@ import {
   FlatList,
   KeyboardAvoidingView,
   Platform,
+  RefreshControl,
   SafeAreaView,
   ScrollView,
   StatusBar,
@@ -14,7 +15,6 @@ import {
   TextInput,
   TouchableOpacity,
   View,
-  RefreshControl,
 } from "react-native";
 import axios from "axios";
 import AsyncStorage from "@react-native-async-storage/async-storage";
@@ -30,29 +30,51 @@ const api = axios.create({
 
 api.interceptors.request.use(async (config) => {
   const token = await AsyncStorage.getItem(TOKEN_KEY);
+
   if (token) {
     config.headers.Authorization = `Bearer ${token}`;
   }
+
   return config;
 });
 
 type AnyRecord = Record<string, any>;
 
+type FieldProps = {
+  label: string;
+  value: string;
+  onChangeText: (value: string) => void;
+  placeholder?: string;
+  secureTextEntry?: boolean;
+  keyboardType?: "default" | "email-address" | "phone-pad";
+  multiline?: boolean;
+};
+
 function getError(error: any): string {
   const data = error?.response?.data;
+
   if (typeof data === "string") return data;
   if (data?.message) return data.message;
   if (data?.detail) return data.detail;
 
   if (data && typeof data === "object") {
     for (const value of Object.values(data)) {
-      if (Array.isArray(value) && value.length) return String(value[0]);
-      if (typeof value === "string") return value;
+      if (Array.isArray(value) && value.length) {
+        return String(value[0]);
+      }
+
+      if (typeof value === "string") {
+        return value;
+      }
     }
   }
 
   if (error?.code === "ECONNABORTED") {
     return "The server took too long to respond. Please try again.";
+  }
+
+  if (!error?.response) {
+    return "Network Error. The browser could not complete the API request. Check the backend connection or CORS configuration.";
   }
 
   return error?.message || "Something went wrong. Please try again.";
@@ -64,6 +86,7 @@ function toArray(value: any): AnyRecord[] {
   if (Array.isArray(value?.data)) return value.data;
   if (Array.isArray(value?.companies)) return value.companies;
   if (Array.isArray(value?.requests)) return value.requests;
+
   return [];
 }
 
@@ -75,18 +98,11 @@ function Field({
   secureTextEntry,
   keyboardType,
   multiline,
-}: {
-  label: string;
-  value: string;
-  onChangeText: (value: string) => void;
-  placeholder?: string;
-  secureTextEntry?: boolean;
-  keyboardType?: "default" | "email-address" | "phone-pad";
-  multiline?: boolean;
-}) {
+}: FieldProps) {
   return (
     <View style={styles.field}>
       <Text style={styles.label}>{label}</Text>
+
       <TextInput
         style={[styles.input, multiline && styles.multiline]}
         value={value}
@@ -95,7 +111,9 @@ function Field({
         placeholderTextColor="#94a3b8"
         secureTextEntry={secureTextEntry}
         keyboardType={keyboardType || "default"}
-        autoCapitalize={keyboardType === "email-address" ? "none" : "sentences"}
+        autoCapitalize={
+          keyboardType === "email-address" ? "none" : "sentences"
+        }
         multiline={multiline}
         textAlignVertical={multiline ? "top" : "center"}
       />
@@ -122,9 +140,16 @@ function Button({
       activeOpacity={0.8}
     >
       {loading ? (
-        <ActivityIndicator color={secondary ? "#0f766e" : "#ffffff"} />
+        <ActivityIndicator
+          color={secondary ? "#0f766e" : "#ffffff"}
+        />
       ) : (
-        <Text style={[styles.buttonText, secondary && styles.secondaryText]}>
+        <Text
+          style={[
+            styles.buttonText,
+            secondary && styles.secondaryText,
+          ]}
+        >
           {title}
         </Text>
       )}
@@ -133,9 +158,13 @@ function Button({
 }
 
 export default function Index() {
-  const [screen, setScreen] = useState<"auth" | "dashboard" | "newRequest" | "requests">("auth");
+  const [screen, setScreen] = useState<
+    "auth" | "dashboard" | "newRequest" | "requests"
+  >("auth");
+
   const [authMode, setAuthMode] = useState<"login" | "register">("login");
   const [loading, setLoading] = useState(false);
+  const [testingBackend, setTestingBackend] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
   const [successMessage, setSuccessMessage] = useState("");
@@ -158,7 +187,8 @@ export default function Index() {
   const [dashboard, setDashboard] = useState<AnyRecord | null>(null);
   const [companies, setCompanies] = useState<AnyRecord[]>([]);
   const [requests, setRequests] = useState<AnyRecord[]>([]);
-  const [selectedCompany, setSelectedCompany] = useState<AnyRecord | null>(null);
+  const [selectedCompany, setSelectedCompany] =
+    useState<AnyRecord | null>(null);
 
   const [requestData, setRequestData] = useState({
     title: "",
@@ -172,14 +202,60 @@ export default function Index() {
     setSuccessMessage("");
   };
 
+  // Temporary diagnostic: sends no credentials and changes no data.
+  const testBackend = async () => {
+    setTestingBackend(true);
+    clearMessages();
+
+    try {
+      const response = await fetch(`${API_URL}/customer/login/`, {
+        method: "OPTIONS",
+      });
+
+      const message =
+        `The server responded with HTTP ${response.status}.\n\n` +
+        "This confirms that a response was received, but does not by itself prove that login works.";
+
+      if (Platform.OS === "web") {
+        window.alert(`SEIYALAM backend test\n\n${message}`);
+      } else {
+        Alert.alert("SEIYALAM backend test", message);
+      }
+    } catch (error: any) {
+      const message =
+        error?.message ||
+        "The browser could not complete the request.";
+
+      if (Platform.OS === "web") {
+        window.alert(
+          "Backend connection failed\n\n" +
+            message +
+            "\n\nThis can be caused by CORS or a connection problem."
+        );
+      } else {
+        Alert.alert(
+          "Backend connection failed",
+          message +
+            "\n\nThis can be caused by CORS or a connection problem."
+        );
+      }
+    } finally {
+      setTestingBackend(false);
+    }
+  };
+
   const loadCustomerData = useCallback(async () => {
-    const [profileResult, dashboardResult, companyResult, requestResult] =
-      await Promise.allSettled([
-        api.get("/me/"),
-        api.get("/dashboard/customer/"),
-        api.get("/customer/companies/"),
-        api.get("/service-requests/my/"),
-      ]);
+    const [
+      profileResult,
+      dashboardResult,
+      companyResult,
+      requestResult,
+    ] = await Promise.allSettled([
+      api.get("/me/"),
+      api.get("/dashboard/customer/"),
+      api.get("/customer/companies/"),
+      api.get("/service-requests/my/"),
+    ]);
 
     if (profileResult.status === "fulfilled") {
       setUser(profileResult.value.data);
@@ -215,13 +291,17 @@ export default function Index() {
 
   const restoreSession = useCallback(async () => {
     const token = await AsyncStorage.getItem(TOKEN_KEY);
+
     if (!token) return;
 
     try {
       setLoading(true);
+
       const response = await api.get("/me/");
+
       setUser(response.data);
       setScreen("dashboard");
+
       await loadCustomerData();
     } catch {
       await AsyncStorage.multiRemove([TOKEN_KEY, REFRESH_KEY]);
@@ -238,7 +318,9 @@ export default function Index() {
     clearMessages();
 
     if (!loginData.username.trim() || !loginData.password) {
-      setErrorMessage("Enter your username or phone number and password.");
+      setErrorMessage(
+        "Enter your username or phone number and password."
+      );
       return;
     }
 
@@ -262,7 +344,10 @@ export default function Index() {
       }
 
       await AsyncStorage.setItem(TOKEN_KEY, access);
-      if (refresh) await AsyncStorage.setItem(REFRESH_KEY, refresh);
+
+      if (refresh) {
+        await AsyncStorage.setItem(REFRESH_KEY, refresh);
+      }
 
       setScreen("dashboard");
       await loadCustomerData();
@@ -321,8 +406,10 @@ export default function Index() {
         response.data?.message ||
           "Registration successful. You can now log in."
       );
+
       setAuthMode("login");
       setLoginData({ username, password: "" });
+
       setRegisterData({
         name: "",
         username: "",
@@ -340,6 +427,7 @@ export default function Index() {
 
   const refreshDashboard = async () => {
     setRefreshing(true);
+
     try {
       await loadCustomerData();
     } catch (error: any) {
@@ -373,8 +461,15 @@ export default function Index() {
         address: requestData.address.trim(),
       });
 
-      setRequestData({ title: "", description: "", phone: "", address: "" });
+      setRequestData({
+        title: "",
+        description: "",
+        phone: "",
+        address: "",
+      });
+
       setSuccessMessage("Your service request has been submitted.");
+
       await loadCustomerData();
       setScreen("requests");
     } catch (error: any) {
@@ -386,6 +481,7 @@ export default function Index() {
 
   const logout = async () => {
     await AsyncStorage.multiRemove([TOKEN_KEY, REFRESH_KEY]);
+
     setUser(null);
     setDashboard(null);
     setRequests([]);
@@ -393,6 +489,7 @@ export default function Index() {
     setSelectedCompany(null);
     setScreen("auth");
     setAuthMode("login");
+
     clearMessages();
   };
 
@@ -405,8 +502,12 @@ export default function Index() {
         <Text style={styles.brand}>SEIYALAM</Text>
         <Text style={styles.tagline}>Services, connected.</Text>
       </View>
+
       {screen !== "auth" && (
-        <TouchableOpacity onPress={logout} style={styles.logoutButton}>
+        <TouchableOpacity
+          onPress={logout}
+          style={styles.logoutButton}
+        >
           <Text style={styles.logoutText}>Log out</Text>
         </TouchableOpacity>
       )}
@@ -420,6 +521,7 @@ export default function Index() {
           <Text style={styles.errorText}>{errorMessage}</Text>
         </View>
       )}
+
       {!!successMessage && (
         <View style={styles.successBox}>
           <Text style={styles.successText}>{successMessage}</Text>
@@ -435,8 +537,11 @@ export default function Index() {
     >
       <View style={styles.hero}>
         <Text style={styles.heroTitle}>
-          {authMode === "login" ? "Welcome back" : "Create your account"}
+          {authMode === "login"
+            ? "Welcome back"
+            : "Create your account"}
         </Text>
+
         <Text style={styles.heroDescription}>
           {authMode === "login"
             ? "Sign in to manage your service requests."
@@ -451,20 +556,37 @@ export default function Index() {
               setAuthMode("login");
               clearMessages();
             }}
-            style={[styles.switchItem, authMode === "login" && styles.switchActive]}
+            style={[
+              styles.switchItem,
+              authMode === "login" && styles.switchActive,
+            ]}
           >
-            <Text style={[styles.switchText, authMode === "login" && styles.switchTextActive]}>
+            <Text
+              style={[
+                styles.switchText,
+                authMode === "login" && styles.switchTextActive,
+              ]}
+            >
               Login
             </Text>
           </TouchableOpacity>
+
           <TouchableOpacity
             onPress={() => {
               setAuthMode("register");
               clearMessages();
             }}
-            style={[styles.switchItem, authMode === "register" && styles.switchActive]}
+            style={[
+              styles.switchItem,
+              authMode === "register" && styles.switchActive,
+            ]}
           >
-            <Text style={[styles.switchText, authMode === "register" && styles.switchTextActive]}>
+            <Text
+              style={[
+                styles.switchText,
+                authMode === "register" && styles.switchTextActive,
+              ]}
+            >
               Register
             </Text>
           </TouchableOpacity>
@@ -472,21 +594,39 @@ export default function Index() {
 
         {renderMessages()}
 
+        <Button
+          title="Test Backend Connection"
+          onPress={testBackend}
+          loading={testingBackend}
+          secondary
+        />
+
         {authMode === "login" ? (
           <>
             <Field
               label="Username or phone number"
               value={loginData.username}
-              onChangeText={(v) => setLoginData({ ...loginData, username: v })}
+              onChangeText={(v) =>
+                setLoginData({ ...loginData, username: v })
+              }
               placeholder="Enter username or phone"
             />
+
             <Field
               label="Password"
               value={loginData.password}
-              onChangeText={(v) => setLoginData({ ...loginData, password: v })}
+              onChangeText={(v) =>
+                setLoginData({ ...loginData, password: v })
+              }
               secureTextEntry
             />
-            <Button title="Sign in" onPress={login} loading={loading} />
+
+            <Button
+              title="Sign in"
+              onPress={login}
+              loading={loading}
+            />
+
             <Text style={styles.helperText}>
               Customer login uses your SEIYALAM account.
             </Text>
@@ -496,40 +636,66 @@ export default function Index() {
             <Field
               label="Full name *"
               value={registerData.name}
-              onChangeText={(v) => setRegisterData({ ...registerData, name: v })}
+              onChangeText={(v) =>
+                setRegisterData({ ...registerData, name: v })
+              }
             />
+
             <Field
               label="Username *"
               value={registerData.username}
-              onChangeText={(v) => setRegisterData({ ...registerData, username: v })}
+              onChangeText={(v) =>
+                setRegisterData({ ...registerData, username: v })
+              }
             />
+
             <Field
               label="Email (optional)"
               value={registerData.email}
-              onChangeText={(v) => setRegisterData({ ...registerData, email: v })}
+              onChangeText={(v) =>
+                setRegisterData({ ...registerData, email: v })
+              }
               keyboardType="email-address"
             />
+
             <Field
               label="10-digit phone number *"
               value={registerData.phone}
               onChangeText={(v) =>
-                setRegisterData({ ...registerData, phone: v.replace(/\D/g, "").slice(0, 10) })
+                setRegisterData({
+                  ...registerData,
+                  phone: v.replace(/\D/g, "").slice(0, 10),
+                })
               }
               keyboardType="phone-pad"
             />
+
             <Field
               label="Password (minimum 8 characters) *"
               value={registerData.password}
-              onChangeText={(v) => setRegisterData({ ...registerData, password: v })}
+              onChangeText={(v) =>
+                setRegisterData({ ...registerData, password: v })
+              }
               secureTextEntry
             />
+
             <Field
               label="Confirm password *"
               value={registerData.confirmPassword}
-              onChangeText={(v) => setRegisterData({ ...registerData, confirmPassword: v })}
+              onChangeText={(v) =>
+                setRegisterData({
+                  ...registerData,
+                  confirmPassword: v,
+                })
+              }
               secureTextEntry
             />
-            <Button title="Create account" onPress={register} loading={loading} />
+
+            <Button
+              title="Create account"
+              onPress={register}
+              loading={loading}
+            />
           </>
         )}
       </View>
@@ -540,15 +706,24 @@ export default function Index() {
     <ScrollView
       contentContainerStyle={styles.content}
       refreshControl={
-        <RefreshControl refreshing={refreshing} onRefresh={refreshDashboard} />
+        <RefreshControl
+          refreshing={refreshing}
+          onRefresh={refreshDashboard}
+        />
       }
     >
       {renderMessages()}
 
       <View style={styles.welcomeBlock}>
         <Text style={styles.welcomeLabel}>CUSTOMER DASHBOARD</Text>
-        <Text style={styles.welcomeTitle}>Hi, {displayName} 👋</Text>
-        <Text style={styles.muted}>Manage your service requests in one place.</Text>
+
+        <Text style={styles.welcomeTitle}>
+          Hi, {displayName} 👋
+        </Text>
+
+        <Text style={styles.muted}>
+          Manage your service requests in one place.
+        </Text>
       </View>
 
       <View style={styles.statsRow}>
@@ -556,6 +731,7 @@ export default function Index() {
           <Text style={styles.statNumber}>{requests.length}</Text>
           <Text style={styles.statLabel}>My requests</Text>
         </View>
+
         <View style={styles.statCard}>
           <Text style={styles.statNumber}>{companies.length}</Text>
           <Text style={styles.statLabel}>Companies</Text>
@@ -569,6 +745,7 @@ export default function Index() {
           setScreen("newRequest");
         }}
       />
+
       <Button
         title="View my requests"
         onPress={() => {
@@ -579,23 +756,36 @@ export default function Index() {
       />
 
       <Text style={styles.sectionTitle}>Recent requests</Text>
+
       {requests.length === 0 ? (
         <View style={styles.emptyCard}>
           <Text style={styles.emptyTitle}>No requests yet</Text>
-          <Text style={styles.muted}>Create a service request to get started.</Text>
+          <Text style={styles.muted}>
+            Create a service request to get started.
+          </Text>
         </View>
       ) : (
         requests.slice(0, 3).map((item, index) => (
-          <View style={styles.requestCard} key={String(item.id ?? index)}>
+          <View
+            style={styles.requestCard}
+            key={String(item.id ?? index)}
+          >
             <Text style={styles.requestNumber}>
               {item.request_number || `Request #${item.id}`}
             </Text>
-            <Text style={styles.requestTitle}>{item.title || "Service request"}</Text>
+
+            <Text style={styles.requestTitle}>
+              {item.title || "Service request"}
+            </Text>
+
             <Text style={styles.muted} numberOfLines={2}>
               {item.description || ""}
             </Text>
+
             <View style={styles.statusPill}>
-              <Text style={styles.statusText}>{String(item.status || "Pending").replaceAll("_", " ")}</Text>
+              <Text style={styles.statusText}>
+                {String(item.status || "Pending").split("_").join(" ")}
+              </Text>
             </View>
           </View>
         ))
@@ -626,21 +816,34 @@ export default function Index() {
 
     return companies.map((company, index) => {
       const isSelected = selectedCompany?.id === company.id;
+
       return (
         <TouchableOpacity
           key={String(company.id ?? index)}
           onPress={() => setSelectedCompany(company)}
-          style={[styles.companyCard, isSelected && styles.companySelected]}
+          style={[
+            styles.companyCard,
+            isSelected && styles.companySelected,
+          ]}
         >
           <View style={styles.companyRadio}>
-            <Text style={styles.companyRadioText}>{isSelected ? "✓" : ""}</Text>
+            <Text style={styles.companyRadioText}>
+              {isSelected ? "✓" : ""}
+            </Text>
           </View>
+
           <View style={styles.companyInfo}>
             <Text style={styles.requestTitle}>
-              {company.name || company.company_name || company.companyName || `Company ${company.id ?? index + 1}`}
+              {company.name ||
+                company.company_name ||
+                company.companyName ||
+                `Company ${company.id ?? index + 1}`}
             </Text>
+
             {!!(company.address || company.location) && (
-              <Text style={styles.muted}>{company.address || company.location}</Text>
+              <Text style={styles.muted}>
+                {company.address || company.location}
+              </Text>
             )}
           </View>
         </TouchableOpacity>
@@ -649,11 +852,16 @@ export default function Index() {
   };
 
   const renderNewRequest = () => (
-    <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
+    <ScrollView
+      contentContainerStyle={styles.content}
+      keyboardShouldPersistTaps="handled"
+    >
       <TouchableOpacity onPress={() => setScreen("dashboard")}>
         <Text style={styles.backLink}>‹ Back to dashboard</Text>
       </TouchableOpacity>
+
       <Text style={styles.pageTitle}>New service request</Text>
+
       <Text style={styles.muted}>
         Choose a company, describe the service you need, and submit your request.
       </Text>
@@ -664,29 +872,41 @@ export default function Index() {
       {renderCompanies()}
 
       <Text style={styles.sectionTitle}>2. Request details</Text>
+
       <Field
         label="Request title *"
         value={requestData.title}
-        onChangeText={(v) => setRequestData({ ...requestData, title: v })}
+        onChangeText={(v) =>
+          setRequestData({ ...requestData, title: v })
+        }
         placeholder="e.g. Air conditioner repair"
       />
+
       <Field
         label="Description *"
         value={requestData.description}
-        onChangeText={(v) => setRequestData({ ...requestData, description: v })}
+        onChangeText={(v) =>
+          setRequestData({ ...requestData, description: v })
+        }
         placeholder="Explain the service you need"
         multiline
       />
+
       <Field
         label="Contact phone"
         value={requestData.phone}
-        onChangeText={(v) => setRequestData({ ...requestData, phone: v })}
+        onChangeText={(v) =>
+          setRequestData({ ...requestData, phone: v })
+        }
         keyboardType="phone-pad"
       />
+
       <Field
         label="Service address"
         value={requestData.address}
-        onChangeText={(v) => setRequestData({ ...requestData, address: v })}
+        onChangeText={(v) =>
+          setRequestData({ ...requestData, address: v })
+        }
         placeholder="Where is the service required?"
         multiline
       />
@@ -705,22 +925,35 @@ export default function Index() {
         <TouchableOpacity onPress={() => setScreen("dashboard")}>
           <Text style={styles.backLink}>‹ Dashboard</Text>
         </TouchableOpacity>
+
         <Text style={styles.pageTitle}>My service requests</Text>
         <Text style={styles.muted}>Pull down to refresh the list.</Text>
       </View>
+
       {renderMessages()}
+
       <FlatList
         data={requests}
         keyExtractor={(item, index) => String(item.id ?? index)}
         refreshControl={
-          <RefreshControl refreshing={refreshing} onRefresh={refreshDashboard} />
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={refreshDashboard}
+          />
         }
         contentContainerStyle={styles.listContent}
         ListEmptyComponent={
           <View style={styles.emptyCard}>
             <Text style={styles.emptyTitle}>Nothing here yet</Text>
-            <Text style={styles.muted}>Your submitted requests will appear here.</Text>
-            <Button title="Create request" onPress={() => setScreen("newRequest")} />
+
+            <Text style={styles.muted}>
+              Your submitted requests will appear here.
+            </Text>
+
+            <Button
+              title="Create request"
+              onPress={() => setScreen("newRequest")}
+            />
           </View>
         }
         renderItem={({ item }) => (
@@ -728,18 +961,29 @@ export default function Index() {
             <Text style={styles.requestNumber}>
               {item.request_number || `Request #${item.id}`}
             </Text>
-            <Text style={styles.requestTitle}>{item.title || "Service request"}</Text>
-            <Text style={styles.muted}>{item.description || ""}</Text>
+
+            <Text style={styles.requestTitle}>
+              {item.title || "Service request"}
+            </Text>
+
+            <Text style={styles.muted}>
+              {item.description || ""}
+            </Text>
+
             {!!item.company_details && (
               <Text style={styles.companyName}>
-                {item.company_details.name || item.company_details.company_name || ""}
+                {item.company_details.name ||
+                  item.company_details.company_name ||
+                  ""}
               </Text>
             )}
+
             <View style={styles.statusPill}>
               <Text style={styles.statusText}>
-                {String(item.status || "Pending").replaceAll("_", " ")}
+                {String(item.status || "Pending").split("_").join(" ")}
               </Text>
             </View>
+
             {!!item.created_at && (
               <Text style={styles.dateText}>
                 Submitted: {new Date(item.created_at).toLocaleDateString()}
@@ -748,8 +992,12 @@ export default function Index() {
           </View>
         )}
       />
+
       <View style={styles.bottomAction}>
-        <Button title="+ New request" onPress={() => setScreen("newRequest")} />
+        <Button
+          title="+ New request"
+          onPress={() => setScreen("newRequest")}
+        />
       </View>
     </View>
   );
@@ -757,7 +1005,9 @@ export default function Index() {
   return (
     <SafeAreaView style={styles.safe}>
       <StatusBar barStyle="light-content" backgroundColor="#0f766e" />
+
       {renderHeader()}
+
       {loading && screen === "auth" && !successMessage ? (
         <View style={styles.loadingScreen}>
           <ActivityIndicator size="large" color="#0f766e" />
@@ -774,16 +1024,55 @@ export default function Index() {
           {screen === "requests" && renderRequests()}
         </KeyboardAvoidingView>
       )}
+
       {screen !== "auth" && (
         <View style={styles.bottomNav}>
-          <TouchableOpacity onPress={() => { clearMessages(); setScreen("dashboard"); }}>
-            <Text style={[styles.navText, screen === "dashboard" && styles.navActive]}>Home</Text>
+          <TouchableOpacity
+            onPress={() => {
+              clearMessages();
+              setScreen("dashboard");
+            }}
+          >
+            <Text
+              style={[
+                styles.navText,
+                screen === "dashboard" && styles.navActive,
+              ]}
+            >
+              Home
+            </Text>
           </TouchableOpacity>
-          <TouchableOpacity onPress={() => { clearMessages(); setScreen("newRequest"); }}>
-            <Text style={[styles.navText, screen === "newRequest" && styles.navActive]}>New request</Text>
+
+          <TouchableOpacity
+            onPress={() => {
+              clearMessages();
+              setScreen("newRequest");
+            }}
+          >
+            <Text
+              style={[
+                styles.navText,
+                screen === "newRequest" && styles.navActive,
+              ]}
+            >
+              New request
+            </Text>
           </TouchableOpacity>
-          <TouchableOpacity onPress={() => { clearMessages(); setScreen("requests"); }}>
-            <Text style={[styles.navText, screen === "requests" && styles.navActive]}>My requests</Text>
+
+          <TouchableOpacity
+            onPress={() => {
+              clearMessages();
+              setScreen("requests");
+            }}
+          >
+            <Text
+              style={[
+                styles.navText,
+                screen === "requests" && styles.navActive,
+              ]}
+            >
+              My requests
+            </Text>
           </TouchableOpacity>
         </View>
       )}
@@ -792,8 +1081,13 @@ export default function Index() {
 }
 
 const styles = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: "#f8fafc" },
-  flex: { flex: 1 },
+  safe: {
+    flex: 1,
+    backgroundColor: "#f8fafc",
+  },
+  flex: {
+    flex: 1,
+  },
   header: {
     backgroundColor: "#0f766e",
     paddingHorizontal: 20,
@@ -802,65 +1096,354 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "space-between",
   },
-  brand: { color: "#ffffff", fontSize: 22, fontWeight: "900", letterSpacing: 1.4 },
-  tagline: { color: "#ccfbf1", fontSize: 12, marginTop: 2 },
-  logoutButton: { borderColor: "#99f6e4", borderWidth: 1, borderRadius: 9, paddingHorizontal: 12, paddingVertical: 8 },
-  logoutText: { color: "#ffffff", fontWeight: "700" },
-  authContent: { padding: 20, paddingBottom: 36 },
-  hero: { paddingVertical: 22 },
-  heroTitle: { fontSize: 29, color: "#0f172a", fontWeight: "900" },
-  heroDescription: { color: "#64748b", marginTop: 8, fontSize: 15, lineHeight: 22 },
-  card: { backgroundColor: "#ffffff", padding: 18, borderRadius: 18, borderWidth: 1, borderColor: "#e2e8f0" },
-  switchRow: { flexDirection: "row", backgroundColor: "#f1f5f9", padding: 4, borderRadius: 12, marginBottom: 20 },
-  switchItem: { flex: 1, paddingVertical: 11, alignItems: "center", borderRadius: 9 },
-  switchActive: { backgroundColor: "#ccfbf1" },
-  switchText: { color: "#64748b", fontWeight: "700" },
-  switchTextActive: { color: "#115e59" },
-  field: { marginBottom: 15 },
-  label: { color: "#334155", fontWeight: "700", fontSize: 13, marginBottom: 7 },
-  input: { backgroundColor: "#ffffff", borderWidth: 1, borderColor: "#cbd5e1", borderRadius: 11, paddingHorizontal: 13, paddingVertical: 12, fontSize: 15, color: "#0f172a" },
-  multiline: { minHeight: 95 },
-  button: { backgroundColor: "#0f766e", borderRadius: 11, paddingVertical: 14, paddingHorizontal: 16, alignItems: "center", justifyContent: "center", marginTop: 9, minHeight: 48 },
-  buttonText: { color: "#ffffff", fontWeight: "800", fontSize: 15 },
-  secondaryButton: { backgroundColor: "#ccfbf1", borderWidth: 1, borderColor: "#99f6e4" },
-  secondaryText: { color: "#115e59" },
-  helperText: { color: "#64748b", fontSize: 12, textAlign: "center", marginTop: 15 },
-  content: { padding: 18, paddingBottom: 35 },
-  welcomeBlock: { marginTop: 10, marginBottom: 18 },
-  welcomeLabel: { color: "#0f766e", fontWeight: "900", fontSize: 11, letterSpacing: 1.3 },
-  welcomeTitle: { color: "#0f172a", fontSize: 27, fontWeight: "900", marginTop: 6 },
-  muted: { color: "#64748b", fontSize: 13, lineHeight: 20, marginTop: 5 },
-  statsRow: { flexDirection: "row", gap: 12, marginBottom: 12 },
-  statCard: { flex: 1, backgroundColor: "#ffffff", borderRadius: 14, padding: 17, borderWidth: 1, borderColor: "#e2e8f0" },
-  statNumber: { fontSize: 27, fontWeight: "900", color: "#0f766e" },
-  statLabel: { color: "#64748b", fontSize: 12, marginTop: 4 },
-  sectionTitle: { color: "#0f172a", fontSize: 17, fontWeight: "900", marginTop: 23, marginBottom: 12 },
-  emptyCard: { backgroundColor: "#ffffff", padding: 18, borderRadius: 14, borderWidth: 1, borderColor: "#e2e8f0", marginTop: 10 },
-  emptyTitle: { color: "#0f172a", fontWeight: "800", fontSize: 16 },
-  requestCard: { backgroundColor: "#ffffff", borderWidth: 1, borderColor: "#e2e8f0", borderRadius: 14, padding: 16, marginBottom: 12 },
-  requestNumber: { color: "#0f766e", fontSize: 11, fontWeight: "900", letterSpacing: 0.5 },
-  requestTitle: { color: "#0f172a", fontSize: 16, fontWeight: "800", marginTop: 7 },
-  statusPill: { alignSelf: "flex-start", backgroundColor: "#ccfbf1", paddingHorizontal: 10, paddingVertical: 6, borderRadius: 20, marginTop: 12 },
-  statusText: { color: "#115e59", fontWeight: "800", fontSize: 11, textTransform: "capitalize" },
-  infoCard: { backgroundColor: "#ffffff", padding: 15, borderRadius: 14, marginTop: 16, borderWidth: 1, borderColor: "#e2e8f0" },
-  companyCard: { flexDirection: "row", alignItems: "center", padding: 13, backgroundColor: "#ffffff", borderWidth: 1, borderColor: "#e2e8f0", borderRadius: 12, marginBottom: 9 },
-  companySelected: { borderColor: "#0f766e", backgroundColor: "#f0fdfa" },
-  companyRadio: { width: 23, height: 23, borderRadius: 12, borderWidth: 1, borderColor: "#0f766e", alignItems: "center", justifyContent: "center", marginRight: 12 },
-  companyRadioText: { color: "#0f766e", fontWeight: "900" },
-  companyInfo: { flex: 1 },
-  companyName: { color: "#475569", fontSize: 12, marginTop: 8 },
-  pageTitle: { color: "#0f172a", fontSize: 25, fontWeight: "900", marginTop: 12, marginBottom: 5 },
-  backLink: { color: "#0f766e", fontWeight: "800", fontSize: 14, marginTop: 4 },
-  errorBox: { backgroundColor: "#fef2f2", borderWidth: 1, borderColor: "#fecaca", borderRadius: 10, padding: 12, marginBottom: 13 },
-  errorText: { color: "#b91c1c", fontSize: 13, lineHeight: 19 },
-  successBox: { backgroundColor: "#f0fdf4", borderWidth: 1, borderColor: "#bbf7d0", borderRadius: 10, padding: 12, marginBottom: 13 },
-  successText: { color: "#166534", fontSize: 13, lineHeight: 19 },
-  listHeading: { padding: 18, paddingBottom: 10 },
-  listContent: { paddingHorizontal: 18, paddingBottom: 20, flexGrow: 1 },
-  dateText: { color: "#94a3b8", fontSize: 11, marginTop: 10 },
-  bottomAction: { paddingHorizontal: 18, paddingBottom: 8, backgroundColor: "#f8fafc" },
-  bottomNav: { flexDirection: "row", justifyContent: "space-around", alignItems: "center", paddingVertical: 13, backgroundColor: "#ffffff", borderTopWidth: 1, borderTopColor: "#e2e8f0" },
-  navText: { color: "#64748b", fontWeight: "700", fontSize: 12 },
-  navActive: { color: "#0f766e", fontWeight: "900" },
-  loadingScreen: { flex: 1, justifyContent: "center", alignItems: "center", gap: 12 },
+  brand: {
+    color: "#ffffff",
+    fontSize: 22,
+    fontWeight: "900",
+    letterSpacing: 1.4,
+  },
+  tagline: {
+    color: "#ccfbf1",
+    fontSize: 12,
+    marginTop: 2,
+  },
+  logoutButton: {
+    borderColor: "#99f6e4",
+    borderWidth: 1,
+    borderRadius: 9,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+  },
+  logoutText: {
+    color: "#ffffff",
+    fontWeight: "700",
+  },
+  authContent: {
+    padding: 20,
+    paddingBottom: 36,
+  },
+  hero: {
+    paddingVertical: 22,
+  },
+  heroTitle: {
+    fontSize: 29,
+    color: "#0f172a",
+    fontWeight: "900",
+  },
+  heroDescription: {
+    color: "#64748b",
+    marginTop: 8,
+    fontSize: 15,
+    lineHeight: 22,
+  },
+  card: {
+    backgroundColor: "#ffffff",
+    padding: 18,
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: "#e2e8f0",
+  },
+  switchRow: {
+    flexDirection: "row",
+    backgroundColor: "#f1f5f9",
+    padding: 4,
+    borderRadius: 12,
+    marginBottom: 20,
+  },
+  switchItem: {
+    flex: 1,
+    paddingVertical: 11,
+    alignItems: "center",
+    borderRadius: 9,
+  },
+  switchActive: {
+    backgroundColor: "#ccfbf1",
+  },
+  switchText: {
+    color: "#64748b",
+    fontWeight: "700",
+  },
+  switchTextActive: {
+    color: "#115e59",
+  },
+  field: {
+    marginBottom: 15,
+  },
+  label: {
+    color: "#334155",
+    fontWeight: "700",
+    fontSize: 13,
+    marginBottom: 7,
+  },
+  input: {
+    backgroundColor: "#ffffff",
+    borderWidth: 1,
+    borderColor: "#cbd5e1",
+    borderRadius: 11,
+    paddingHorizontal: 13,
+    paddingVertical: 12,
+    fontSize: 15,
+    color: "#0f172a",
+  },
+  multiline: {
+    minHeight: 95,
+  },
+  button: {
+    backgroundColor: "#0f766e",
+    borderRadius: 11,
+    paddingVertical: 14,
+    paddingHorizontal: 16,
+    alignItems: "center",
+    justifyContent: "center",
+    marginTop: 9,
+    minHeight: 48,
+  },
+  buttonText: {
+    color: "#ffffff",
+    fontWeight: "800",
+    fontSize: 15,
+  },
+  secondaryButton: {
+    backgroundColor: "#ccfbf1",
+    borderWidth: 1,
+    borderColor: "#99f6e4",
+  },
+  secondaryText: {
+    color: "#115e59",
+  },
+  helperText: {
+    color: "#64748b",
+    fontSize: 12,
+    textAlign: "center",
+    marginTop: 15,
+  },
+  content: {
+    padding: 18,
+    paddingBottom: 35,
+  },
+  welcomeBlock: {
+    marginTop: 10,
+    marginBottom: 18,
+  },
+  welcomeLabel: {
+    color: "#0f766e",
+    fontWeight: "900",
+    fontSize: 11,
+    letterSpacing: 1.3,
+  },
+  welcomeTitle: {
+    color: "#0f172a",
+    fontSize: 27,
+    fontWeight: "900",
+    marginTop: 6,
+  },
+  muted: {
+    color: "#64748b",
+    fontSize: 13,
+    lineHeight: 20,
+    marginTop: 5,
+  },
+  statsRow: {
+    flexDirection: "row",
+    gap: 12,
+    marginBottom: 12,
+  },
+  statCard: {
+    flex: 1,
+    backgroundColor: "#ffffff",
+    borderRadius: 14,
+    padding: 17,
+    borderWidth: 1,
+    borderColor: "#e2e8f0",
+  },
+  statNumber: {
+    fontSize: 27,
+    fontWeight: "900",
+    color: "#0f766e",
+  },
+  statLabel: {
+    color: "#64748b",
+    fontSize: 12,
+    marginTop: 4,
+  },
+  sectionTitle: {
+    color: "#0f172a",
+    fontSize: 17,
+    fontWeight: "900",
+    marginTop: 23,
+    marginBottom: 12,
+  },
+  emptyCard: {
+    backgroundColor: "#ffffff",
+    padding: 18,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: "#e2e8f0",
+    marginTop: 10,
+  },
+  emptyTitle: {
+    color: "#0f172a",
+    fontWeight: "800",
+    fontSize: 16,
+  },
+  requestCard: {
+    backgroundColor: "#ffffff",
+    borderWidth: 1,
+    borderColor: "#e2e8f0",
+    borderRadius: 14,
+    padding: 16,
+    marginBottom: 12,
+  },
+  requestNumber: {
+    color: "#0f766e",
+    fontSize: 11,
+    fontWeight: "900",
+    letterSpacing: 0.5,
+  },
+  requestTitle: {
+    color: "#0f172a",
+    fontSize: 16,
+    fontWeight: "800",
+    marginTop: 7,
+  },
+  statusPill: {
+    alignSelf: "flex-start",
+    backgroundColor: "#ccfbf1",
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 20,
+    marginTop: 12,
+  },
+  statusText: {
+    color: "#115e59",
+    fontWeight: "800",
+    fontSize: 11,
+    textTransform: "capitalize",
+  },
+  infoCard: {
+    backgroundColor: "#ffffff",
+    padding: 15,
+    borderRadius: 14,
+    marginTop: 16,
+    borderWidth: 1,
+    borderColor: "#e2e8f0",
+  },
+  companyCard: {
+    flexDirection: "row",
+    alignItems: "center",
+    padding: 13,
+    backgroundColor: "#ffffff",
+    borderWidth: 1,
+    borderColor: "#e2e8f0",
+    borderRadius: 12,
+    marginBottom: 9,
+  },
+  companySelected: {
+    borderColor: "#0f766e",
+    backgroundColor: "#f0fdfa",
+  },
+  companyRadio: {
+    width: 23,
+    height: 23,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: "#0f766e",
+    alignItems: "center",
+    justifyContent: "center",
+    marginRight: 12,
+  },
+  companyRadioText: {
+    color: "#0f766e",
+    fontWeight: "900",
+  },
+  companyInfo: {
+    flex: 1,
+  },
+  companyName: {
+    color: "#475569",
+    fontSize: 12,
+    marginTop: 8,
+  },
+  pageTitle: {
+    color: "#0f172a",
+    fontSize: 25,
+    fontWeight: "900",
+    marginTop: 12,
+    marginBottom: 5,
+  },
+  backLink: {
+    color: "#0f766e",
+    fontWeight: "800",
+    fontSize: 14,
+    marginTop: 4,
+  },
+  errorBox: {
+    backgroundColor: "#fef2f2",
+    borderWidth: 1,
+    borderColor: "#fecaca",
+    borderRadius: 10,
+    padding: 12,
+    marginBottom: 13,
+  },
+  errorText: {
+    color: "#b91c1c",
+    fontSize: 13,
+    lineHeight: 19,
+  },
+  successBox: {
+    backgroundColor: "#f0fdf4",
+    borderWidth: 1,
+    borderColor: "#bbf7d0",
+    borderRadius: 10,
+    padding: 12,
+    marginBottom: 13,
+  },
+  successText: {
+    color: "#166534",
+    fontSize: 13,
+    lineHeight: 19,
+  },
+  listHeading: {
+    padding: 18,
+    paddingBottom: 10,
+  },
+  listContent: {
+    paddingHorizontal: 18,
+    paddingBottom: 20,
+    flexGrow: 1,
+  },
+  dateText: {
+    color: "#94a3b8",
+    fontSize: 11,
+    marginTop: 10,
+  },
+  bottomAction: {
+    paddingHorizontal: 18,
+    paddingBottom: 8,
+    backgroundColor: "#f8fafc",
+  },
+  bottomNav: {
+    flexDirection: "row",
+    justifyContent: "space-around",
+    alignItems: "center",
+    paddingVertical: 13,
+    backgroundColor: "#ffffff",
+    borderTopWidth: 1,
+    borderTopColor: "#e2e8f0",
+  },
+  navText: {
+    color: "#64748b",
+    fontWeight: "700",
+    fontSize: 12,
+  },
+  navActive: {
+    color: "#0f766e",
+    fontWeight: "900",
+  },
+  loadingScreen: {
+    flex: 1,
+    justifyContent: "center",
+    alignItems: "center",
+    gap: 12,
+  },
 });

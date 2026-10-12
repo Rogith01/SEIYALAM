@@ -317,6 +317,11 @@ REST_FRAMEWORK = {
 # CORS
 # ============================================================
 
+
+# ============================================================
+# CORS
+# ============================================================
+
 CORS_ALLOWED_ORIGINS = [
     origin.strip()
     for origin in os.getenv(
@@ -325,12 +330,32 @@ CORS_ALLOWED_ORIGINS = [
     ).split(",")
     if origin.strip()
 ]
-if DEBUG:
-    CORS_ALLOWED_ORIGINS += [
-        "http://localhost:8081",
-        "http://127.0.0.1:8081",
-    ]
 
+# Local Expo Web development
+CORS_ALLOWED_ORIGINS += [
+    "http://localhost:8081",
+    "http://127.0.0.1:8081",
+]
+
+# Allow authorization and JSON requests
+CORS_ALLOW_HEADERS = [
+    "accept",
+    "authorization",
+    "content-type",
+    "origin",
+    "user-agent",
+    "x-csrftoken",
+    "x-requested-with",
+]
+
+CORS_ALLOW_METHODS = [
+    "DELETE",
+    "GET",
+    "OPTIONS",
+    "PATCH",
+    "POST",
+    "PUT",
+]
 # ============================================================
 # API DOCUMENTATION
 # ============================================================
