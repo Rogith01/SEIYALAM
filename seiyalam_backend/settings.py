@@ -325,7 +325,11 @@ CORS_ALLOWED_ORIGINS = [
     ).split(",")
     if origin.strip()
 ]
-
+if DEBUG:
+    CORS_ALLOWED_ORIGINS += [
+        "http://localhost:8081",
+        "http://127.0.0.1:8081",
+    ]
 
 # ============================================================
 # API DOCUMENTATION
