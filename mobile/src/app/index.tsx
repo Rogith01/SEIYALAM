@@ -19,11 +19,12 @@ import {
 import axios from "axios";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as Location from "expo-location";
+import * as DocumentPicker from "expo-document-picker";
 import { Linking } from "react-native";
 
 const API_URL = "https://seiyalam.onrender.com/api";
-const TOKEN_KEY = "seiyalam_customer_access";
-const REFRESH_KEY = "seiyalam_customer_refresh";
+const TOKEN_KEY = "seiyalam_access";
+const REFRESH_KEY = "seiyalam_refresh";
 
 const C = {
   navy: "#080D20",
@@ -41,6 +42,7 @@ const C = {
 type Data = Record<string, any>;
 type Page =
   | "dashboard"
+  | "workerDashboard"
   | "requests"
   | "requestDetails"
   | "newRequest"
@@ -267,6 +269,10 @@ export default function Index() {
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
   const [authenticated, setAuthenticated] = useState(false);
+  const [portalRole, setPortalRole] = useState<"customer" | "worker">("customer");
+  const [workProgress, setWorkProgress] = useState("");
+  const [announcementDismissed, setAnnouncementDismissed] = useState(false);
+  const [evidenceDescription, setEvidenceDescription] = useState("");
 
   const [loginData, setLoginData] = useState({
     username: "",
@@ -346,12 +352,13 @@ export default function Index() {
     setSuccess("");
   };
 
-  const loadData = useCallback(async () => {
+  const loadData = useCallback(async (roleOverride?: "customer" | "worker") => {
+    const isWorkerPortal = (roleOverride || portalRole) === "worker";
     const jobs = await Promise.allSettled([
       api.get("/me/"),
-      api.get("/dashboard/customer/"),
-      api.get("/customer/companies/"),
-      api.get("/service-requests/my/"),
+      isWorkerPortal ? api.get("/dashboard/worker/") : api.get("/dashboard/customer/"),
+      isWorkerPortal ? api.get("/work-orders/my/") : api.get("/customer/companies/"),
+      isWorkerPortal ? api.get("/work-orders/my/") : api.get("/service-requests/my/"),
       api.get("/work-orders/my/"),
       api.get("/notifications/"),
       api.get("/platform/settings/"),
@@ -372,10 +379,12 @@ export default function Index() {
       setDashboard(jobs[1].value.data || {});
     }
     if (jobs[2].status === "fulfilled") {
-      setCompanies(arr(jobs[2].value.data));
+      if (isWorkerPortal) setWorkOrders(arr(jobs[2].value.data));
+      else setCompanies(arr(jobs[2].value.data));
     }
     if (jobs[3].status === "fulfilled") {
-      setRequests(arr(jobs[3].value.data));
+      if (!isWorkerPortal) setRequests(arr(jobs[3].value.data));
+      else setWorkOrders(arr(jobs[3].value.data));
     }
     if (jobs[4].status === "fulfilled") {
       setWorkOrders(arr(jobs[4].value.data));
@@ -393,7 +402,7 @@ export default function Index() {
         ? "Some information could not load. Use Refresh to try again."
         : ""
     );
-  }, []);
+  }, [portalRole]);
 
   const restoreSession = useCallback(async () => {
     try {
@@ -404,11 +413,17 @@ export default function Index() {
       }
 
       setLoading(true);
-      await api.get("/me/");
+      const me = await api.get("/me/");
+      const roleText = String(me.data?.role || me.data?.user_type || me.data?.account_type || "").toLowerCase();
+      const savedRole = await AsyncStorage.getItem("seiyalam_portal_role");
+      const isWorker = roleText.includes("worker") || savedRole === "worker";
+      const role = isWorker ? "worker" : "customer";
+      setPortalRole(role);
       setAuthenticated(true);
-      await loadData();
+      setPage(isWorker ? "workerDashboard" : "dashboard");
+      await loadData(role);
     } catch {
-      await AsyncStorage.multiRemove([TOKEN_KEY, REFRESH_KEY]);
+      await AsyncStorage.multiRemove([TOKEN_KEY, REFRESH_KEY, "seiyalam_portal_role"]);
       setAuthenticated(false);
     } finally {
       setLoading(false);
@@ -433,37 +448,70 @@ export default function Index() {
   const login = async () => {
     clearMessages();
 
-    if (!loginData.username.trim() || !loginData.password) {
+    const identifier = loginData.username.trim();
+    if (!identifier || !loginData.password) {
       setError("Enter your username and password.");
       return;
     }
 
     try {
       setLoading(true);
+      let res: any;
+      let isFounder = false;
 
-      const res = await axios.post(
-        `${API_URL}/customer/login/`,
-        {
-          username: loginData.username.trim(),
-          password: loginData.password,
-        },
-        { timeout: 60000 }
-      );
+      // Match the website authentication flow exactly:
+      // 10-digit identifiers use customer login; other usernames try Founder
+      // login first, then regular Admin/Worker JWT login.
+      if (/^\d{10}$/.test(identifier)) {
+        res = await axios.post(
+          `${API_URL}/customer/login/`,
+          { username: identifier, password: loginData.password },
+          { timeout: 60000 }
+        );
+      } else {
+        try {
+          res = await axios.post(
+            `${API_URL}/founder/token/`,
+            { username: identifier, password: loginData.password },
+            { timeout: 60000 }
+          );
+          isFounder = true;
+        } catch (loginError: any) {
+          if (loginError?.response?.status !== 401) throw loginError;
+          res = await axios.post(
+            `${API_URL}/token/`,
+            { username: identifier, password: loginData.password },
+            { timeout: 60000 }
+          );
+        }
+      }
 
-      if (!res.data?.access) {
-        throw new Error("The server did not return an access token.");
+      if (!res.data?.access || !res.data?.refresh) {
+        throw new Error("Login response did not contain valid access and refresh tokens.");
       }
 
       await AsyncStorage.setItem(TOKEN_KEY, res.data.access);
+      await AsyncStorage.setItem(REFRESH_KEY, res.data.refresh);
+      await AsyncStorage.setItem("seiyalam_portal_role", "customer");
 
-      if (res.data.refresh) {
-        await AsyncStorage.setItem(REFRESH_KEY, res.data.refresh);
-      }
-
+      // The website uses /me/ as the source of truth for the account role.
+      const meResponse = await axios.get(`${API_URL}/me/`, {
+        headers: { Authorization: `Bearer ${res.data.access}` },
+        timeout: 60000,
+      });
+      const loggedInUser = meResponse.data || res.data?.user || res.data?.profile || {};
+      const roleText = String(
+        loggedInUser.role || loggedInUser.user_type || loggedInUser.account_type ||
+        (isFounder ? "founder" : "")
+      ).toLowerCase();
+      const isWorker = roleText.includes("worker");
+      const role = isWorker ? "worker" : "customer";
+      await AsyncStorage.setItem("seiyalam_portal_role", role);
+      setPortalRole(role);
       setAuthenticated(true);
-      setPage("dashboard");
-      await loadData();
-    } catch (e) {
+      setPage(isWorker ? "workerDashboard" : "dashboard");
+      await loadData(role);
+    } catch (e: any) {
       setError(message(e));
     } finally {
       setLoading(false);
@@ -560,7 +608,8 @@ export default function Index() {
     setPage("dashboard");
     setLoginData({ username: "", password: "" });
 
-    await AsyncStorage.multiRemove([TOKEN_KEY, REFRESH_KEY]);
+    setPortalRole("customer");
+    await AsyncStorage.multiRemove([TOKEN_KEY, REFRESH_KEY, "seiyalam_portal_role"]);
   };
 
   const navigate = (target: Page) => {
@@ -594,7 +643,28 @@ export default function Index() {
 
     try {
       const res = await api.get(`/work-orders/${item.id}/`);
-      setSelectedWorkOrder(res.data?.data || res.data || item);
+      let detail: Data = res.data?.data || res.data || item;
+      // Some API serializers return only service_request_id instead of nesting
+      // the full request. Fetch the linked request so the worker sees what the
+      // customer actually asked for.
+      // The website serializer exposes the linked request as
+      // service_request_details. Keep that shape and support mobile/API variants.
+      const existingRequest = detail.service_request_details ||
+        (detail.service_request && typeof detail.service_request === "object" ? detail.service_request : null) ||
+        detail.request_details || null;
+      const requestId = detail.service_request_id ?? detail.service_request?.id ??
+        detail.service_request_details?.id ?? detail.request_id ?? item.service_request_id ??
+        item.service_request?.id ?? item.service_request_details?.id;
+      if (requestId != null && (!existingRequest || !existingRequest.description)) {
+        try {
+          const requestResponse = await api.get(`/service-requests/${requestId}/`);
+          const requestData = requestResponse.data?.data || requestResponse.data;
+          detail = { ...detail, service_request: requestData, service_request_details: requestData };
+        } catch { /* Keep available work-order details if request lookup is restricted. */ }
+      } else if (existingRequest) {
+        detail = { ...detail, service_request_details: existingRequest };
+      }
+      setSelectedWorkOrder(detail);
     } catch {
       // Keep the list record if detail retrieval fails.
     }
@@ -699,8 +769,8 @@ await api.post("/service-requests/", {
   description: requestForm.description.trim(),
   phone: requestForm.phone.trim(),
   address: requestForm.address.trim(),
-  location_latitude: coords.latitude,
-  location_longitude: coords.longitude,
+location_latitude: Number(coords.latitude.toFixed(6)),
+location_longitude: Number(coords.longitude.toFixed(6)),
 });
 
     // Reset the form after successful submission.
@@ -805,7 +875,7 @@ await api.post("/service-requests/", {
     }
   };
 
-  const displayName = user?.name || user?.username || "Customer";
+  const displayName = user?.name || user?.username || (portalRole === "worker" ? "Worker" : "Customer");
   const unreadCount = notifications.filter(
     (n) => !(n.is_read ?? n.read)
   ).length;
@@ -831,9 +901,12 @@ await api.post("/service-requests/", {
 
   const renderPlatformNotices = () => (
     <>
-      {!!platformAnnouncement.trim() && (
-        <View style={styles.successBox}>
-          <Text style={styles.successText}>{platformAnnouncement}</Text>
+      {!!platformAnnouncement.trim() && !announcementDismissed && (
+        <View style={[styles.successBox, { flexDirection: "row", alignItems: "flex-start", gap: 10 }]}>
+          <Text style={[styles.successText, { flex: 1 }]}>{platformAnnouncement}</Text>
+          <Pressable accessibilityRole="button" accessibilityLabel="Dismiss platform announcement" onPress={() => setAnnouncementDismissed(true)} hitSlop={10} style={{ paddingHorizontal: 5, paddingVertical: 1 }}>
+            <Text style={{ color: C.muted, fontSize: 22, fontWeight: "700" }}>×</Text>
+          </Pressable>
         </View>
       )}
       {maintenanceEnabled && (
@@ -879,7 +952,7 @@ await api.post("/service-requests/", {
         style={styles.brandBlock}
       >
         <Text style={styles.brand}>{platformName}</Text>
-        <Text style={styles.brandSub}>Customer Portal</Text>
+        <Text style={styles.brandSub}>{portalRole === "worker" ? "Worker Portal" : "Customer Portal"}</Text>
       </Pressable>
 
       <Pressable
@@ -911,10 +984,10 @@ await api.post("/service-requests/", {
 
   const renderDashboard = () => (
     <>
-      <Text style={styles.breadcrumb}>{platformName}  ›  Customer Portal</Text>
-      <Text style={styles.pageTitle}>Customer Dashboard</Text>
+      <Text style={styles.breadcrumb}>{platformName}  ›  {portalRole === "worker" ? "Worker Portal" : "Customer Portal"}</Text>
+      <Text style={styles.pageTitle}>{portalRole === "worker" ? "Worker Dashboard" : "Customer Dashboard"}</Text>
       <Text style={styles.muted}>
-        Track your service requests and work progress.
+        {portalRole === "worker" ? "Manage your assigned jobs and report work progress." : "Track your service requests and work progress."}
       </Text>
 
       <Button
@@ -1265,7 +1338,7 @@ await api.post("/service-requests/", {
         </Pressable>
 
         <Text style={styles.breadcrumb}>
-          {platformName}  ›  Customer Portal
+          {platformName}  ›  {portalRole === "worker" ? "Worker Portal" : "Customer Portal"}
         </Text>
         <Text style={styles.pageTitle}>
           {r.title || "Service Request"}
@@ -1345,7 +1418,7 @@ await api.post("/service-requests/", {
   const renderWorkOrders = () => (
     <>
       <Text style={styles.breadcrumb}>
-        {platformName}  ›  Customer Portal
+        {platformName}  ›  {portalRole === "worker" ? "Worker Portal" : "Customer Portal"}
       </Text>
       <Text style={styles.pageTitle}>My Work Orders</Text>
       <Text style={styles.muted}>
@@ -1449,7 +1522,7 @@ await api.post("/service-requests/", {
         </Pressable>
 
         <Text style={styles.breadcrumb}>
-          {platformName}  ›  Customer Portal
+          {platformName}  ›  {portalRole === "worker" ? "Worker Portal" : "Customer Portal"}
         </Text>
         <Text style={styles.pageTitle}>
           {w.title || w.service_request_title || "Work Order"}
@@ -1809,10 +1882,175 @@ await api.post("/service-requests/", {
     </>
   );
 
+  const callWorkerAction = async (item: Data, action: "accept" | "start" | "complete" | "log") => {
+    if (maintenanceEnabled) {
+      setError(maintenanceMessage.trim() || `${platformName} is currently under maintenance.`);
+      return;
+    }
+    if (item?.id == null) { setError("Work order ID is missing."); return; }
+    if (action === "log" && !workProgress.trim()) { setError("Enter work progress before saving."); return; }
+    clearMessages();
+    setLoading(true);
+    try {
+      const id = item.id;
+      // Django URL configuration exposes WorkOrderActionView at
+      // /work-orders/<id>/<action>/; use that canonical route for status changes.
+      if (action === "log") {
+        await api.post("/work-logs/", {
+          work_order: id,
+          description: workProgress.trim(),
+          notes: workProgress.trim(),
+          log_type: "progress",
+        });
+      } else {
+        await api.post(`/work-orders/${id}/${action}/`);
+      }
+      setSuccess(action === "log" ? "Work progress saved." : `Work order ${action === "start" ? "started" : action === "complete" ? "marked complete" : "accepted"}.`);
+      if (action === "log") setWorkProgress("");
+      await loadData();
+      const detail = await api.get(`/work-orders/${id}/`);
+      let updated: Data = detail.data?.data || detail.data || item;
+      const requestId = updated.service_request_id ?? updated.service_request?.id ?? updated.request_id;
+      if (requestId != null && (!updated.service_request || typeof updated.service_request !== "object" || !updated.service_request.description)) {
+        try {
+          const req = await api.get(`/service-requests/${requestId}/`);
+          updated = { ...updated, service_request: req.data?.data || req.data };
+        } catch { /* Request details are optional if API permissions deny the lookup. */ }
+      }
+      setSelectedWorkOrder(updated);
+    } catch (e: any) {
+      const status = e?.response?.status;
+      const detail = e?.response?.data?.detail;
+      if (status === 401 || String(detail || "").toLowerCase().includes("token")) {
+        setError("Your session token was rejected by the server. Please log out and sign in again. If this repeats, the backend's worker action endpoint is using a different authentication/token configuration than /me/.");
+      } else {
+        setError(message(e));
+      }
+    } finally { setLoading(false); }
+  };
+
+  const uploadWorkEvidence = async (item: Data) => {
+    if (maintenanceEnabled) {
+      setError(maintenanceMessage.trim() || `${platformName} is currently under maintenance.`);
+      return;
+    }
+    if (item?.id == null) { setError("Work order ID is missing."); return; }
+    clearMessages();
+    try {
+      const result = await DocumentPicker.getDocumentAsync({ copyToCacheDirectory: true, multiple: false, type: ["image/*", "application/pdf"] });
+      if (result.canceled || !result.assets?.length) return;
+      const asset = result.assets[0];
+      const form = new FormData();
+      form.append("work_order", String(item.id));
+      form.append("description", evidenceDescription.trim() || "Work evidence");
+      form.append("file", { uri: asset.uri, name: asset.name || "work-evidence", type: asset.mimeType || "application/octet-stream" } as any);
+      setLoading(true);
+      await api.post("/work-evidence/", form, { headers: { "Content-Type": "multipart/form-data" } });
+      setSuccess("Work evidence uploaded successfully.");
+      setEvidenceDescription("");
+      const detail = await api.get(`/work-orders/${item.id}/`);
+      setSelectedWorkOrder(detail.data?.data || detail.data || item);
+    } catch (e: any) {
+      setError(message(e));
+    } finally { setLoading(false); }
+  };
+
+  const renderWorkerDashboard = () => {
+    const assigned = workOrders.filter((w) => ["assigned", "pending", "new"].includes(String(w.status || "").toLowerCase()));
+    const active = workOrders.filter((w) => ["accepted", "on_the_way", "in_progress", "in progress"].includes(String(w.status || "").toLowerCase()));
+    const completed = workOrders.filter((w) => ["completed", "closed", "customer_confirmed"].includes(String(w.status || "").toLowerCase()));
+    return <>
+      <Text style={styles.breadcrumb}>{platformName}  ›  Worker Portal</Text>
+      <Text style={styles.pageTitle}>Worker Dashboard</Text>
+      <Text style={styles.muted}>Review assigned jobs and keep customers updated.</Text>
+      <Button title="↻ Refresh" secondary onPress={() => void refresh()} />
+      <View style={styles.statsGrid}>
+        <Card><Text style={styles.statLabel}>Total Jobs</Text><Text style={styles.statNumber}>{workOrders.length}</Text><Text style={styles.muted}>Assigned to you</Text></Card>
+        <Card><Text style={styles.statLabel}>Pending Jobs</Text><Text style={styles.statNumber}>{assigned.length}</Text><Text style={styles.muted}>Awaiting acceptance</Text></Card>
+        <Card><Text style={styles.statLabel}>In Progress</Text><Text style={styles.statNumber}>{active.length}</Text><Text style={styles.muted}>Currently active</Text></Card>
+        <Card><Text style={styles.statLabel}>Completed</Text><Text style={styles.statNumber}>{completed.length}</Text><Text style={styles.muted}>Finished jobs</Text></Card>
+      </View>
+      <Text style={styles.sectionTitle}>Recent Work Orders</Text>
+      {workOrders.length ? workOrders.slice(0, 8).map((w, i) => <Pressable key={String(w.id ?? i)} onPress={() => void openWorkOrder(w)}><Card><View style={styles.between}><Text style={styles.smallBlue}>{w.work_order_number || `WO-${w.id}`}</Text><Tag value={w.status} /></View><Text style={styles.cardTitle}>{w.title || w.service_request_title || w.service_request?.title || "Service job"}</Text><Text style={styles.muted}>Customer: {w.customer_name || w.customer_details?.name || w.customer?.name || "Not provided"}</Text><Text style={styles.muted}>Location: {w.address || w.service_request?.address || w.location || "Not provided"}</Text><Text style={styles.link}>Open Work Order →</Text></Card></Pressable>) : <Card><Text style={styles.cardTitle}>No work orders yet</Text><Text style={styles.muted}>New jobs assigned to your account will appear here.</Text></Card>}
+      <Text style={styles.sectionTitle}>Recent Notifications</Text>
+      {notifications.slice(0, 3).map((n, i) => <Card key={String(n.id ?? i)}><Text style={styles.cardTitle}>{n.title || n.notification_type || "Update"}</Text><Text style={styles.muted}>{n.message || n.body || n.description || ""}</Text></Card>)}
+    </>;
+  };
+
+  const renderWorkerOrders = () => {
+    const filtered = workOrders.filter((w) => `${w.title || w.service_request_details?.title || w.service_request?.title || ""} ${w.work_order_number || ""} ${w.id || ""} ${w.customer_name || w.service_request_details?.customer?.name || w.service_request?.customer?.name || ""} ${w.status || ""}`.toLowerCase().includes(search.toLowerCase()) && (statusFilter === "All Status" || statusText(w.status).toLowerCase() === statusFilter.toLowerCase()));
+    return <>
+      <Text style={styles.breadcrumb}>{platformName}  ›  Worker Portal</Text><Text style={styles.pageTitle}>My Work Orders</Text><Text style={styles.muted}>View assigned jobs, contact customers, and submit work progress.</Text>
+      <Field label="Search work orders..." value={search} onChangeText={setSearch} />
+      <View style={styles.filterRow}>{["All Status", "Assigned", "Accepted", "On The Way", "In Progress", "Completed", "Closed"].map((st) => <Pressable key={st} onPress={() => setStatusFilter(st)} style={[styles.filter, statusFilter === st && styles.filterActive]}><Text style={[styles.filterText, statusFilter === st && styles.filterTextActive]}>{st}</Text></Pressable>)}</View>
+      <Button title="↻ Refresh" secondary onPress={() => void refresh()} />
+      {filtered.length ? filtered.map((w, i) => <Pressable key={String(w.id ?? i)} onPress={() => void openWorkOrder(w)}><Card><View style={styles.between}><Text style={styles.smallBlue}>{w.work_order_number || `WO-${w.id}`}</Text><Tag value={w.status} /></View><Text style={styles.cardTitle}>{w.service_request_details?.title || w.service_request?.title || w.title || w.service_request_title || "Service job"}</Text><Row label="Service Request" value={w.service_request_details?.request_number || w.request_number || w.service_request_number || w.service_request?.request_number || w.service_request_id} /><Row label="Customer" value={w.service_request_details?.customer?.name || w.service_request_details?.customer?.username || w.customer_name || w.customer_details?.name || w.customer?.name || w.service_request?.customer?.name} /><Row label="Location" value={w.service_request_details?.address || w.address || w.service_request?.address || w.location} /><Text style={styles.link}>Open Work Order →</Text></Card></Pressable>) : <Card><Text style={styles.cardTitle}>No matching work orders</Text></Card>}
+    </>;
+  };
+
+  const renderWorkerOrderDetails = () => {
+    const w = selectedWorkOrder;
+    if (!w) return <Text style={styles.muted}>No work order selected.</Text>;
+    const status = String(w.status || "assigned").toLowerCase();
+    // Match the working website portal's serializer contract first.
+    const request = (w.service_request_details && typeof w.service_request_details === "object")
+      ? w.service_request_details
+      : (w.service_request && typeof w.service_request === "object")
+        ? w.service_request
+        : w.request_details || {};
+    const customer = request.customer_details || request.customer || w.customer_details || w.customer || {};
+    const phone = w.customer_phone || customer.phone || customer.mobile || request.phone || request.customer_phone || w.phone;
+    const email = w.customer_email || customer.email || request.email;
+    const address = request.address || w.address || request.location || w.location || customer.address || "";
+    const customerName = customer.name || customer.full_name || customer.username || w.customer_name || request.customer_name || request.name;
+    const serviceTitle = request.title || request.service_name || request.requested_service || w.service_request_title || w.service_title || w.title;
+    const serviceDescription = request.description || request.details || request.problem_description || w.description || w.notes;
+    const evidence = arr(w.evidence || w.work_evidence || w.attachments || request.evidence);
+    const logs = arr(w.logs || w.work_logs || w.progress_logs);
+    return <>
+      <Pressable onPress={() => navigate("workOrders")}><Text style={styles.link}>← Back to Work Orders</Text></Pressable>
+      <Text style={styles.breadcrumb}>{platformName}  ›  Worker Portal</Text><Text style={styles.pageTitle}>{w.title || serviceTitle || "Work Order"}</Text><Text style={styles.muted}>Work Order #{w.work_order_number || w.id}</Text>
+      <Card>
+        <View style={styles.between}><Text style={styles.sectionTitle}>Work Order Status</Text><Tag value={w.status} /></View>
+        <Row label="Service Request" value={w.request_number || w.service_request_number || request.request_number || request.id || w.service_request_id} />
+        <Row label="Assigned Date" value={dateText(w.assigned_at || w.assigned_date || w.created_at)} />
+        <Row label="Customer" value={customerName} />
+        <Row label="Location" value={address} />
+        {!!phone && <Button title={`☎ Call Customer · ${phone}`} secondary onPress={() => void Linking.openURL(`tel:${phone}`)} />}
+        {!!email && <Button title={`✉ Email Customer · ${email}`} secondary onPress={() => void Linking.openURL(`mailto:${email}`)} />}
+        {!!address && <Button title="📍 Open in Google Maps" secondary onPress={() => void Linking.openURL(`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(address)}`)} />}
+      </Card>
+      <Card>
+        <Text style={styles.sectionTitle}>Customer Service Request</Text>
+        <Row label="Requested Service" value={serviceTitle} />
+        <Text style={styles.muted}>Customer's description / issue</Text>
+        <Text style={styles.description}>{serviceDescription || "The service request details were not included in the work-order response."}</Text>
+        <Row label="Request ID" value={request.request_number || request.id || w.service_request_id} />
+        <Row label="Request Status" value={request.status} />
+        <Row label="Customer Contact" value={phone || email} />
+      </Card>
+      {(status === "assigned" || status === "pending" || status === "new") ? <Button title={loading ? "Please wait..." : "✓ Accept Job"} disabled={loading} onPress={() => void callWorkerAction(w, "accept")} /> : null}
+      {["accepted", "on_the_way", "on the way"].includes(status) ? <Button title={loading ? "Please wait..." : "▶ Start Work"} disabled={loading} onPress={() => void callWorkerAction(w, "start")} /> : null}
+      {! ["completed", "closed", "customer_confirmed"].includes(status) ? <Card>
+        <Text style={styles.sectionTitle}>Work Progress</Text>
+        <Field label="Work progress, issue found, parts used..." value={workProgress} onChangeText={setWorkProgress} multiline placeholder="Describe the work performed..." />
+        <Button title={loading ? "Saving..." : "Save Work Progress"} disabled={loading || !workProgress.trim()} secondary onPress={() => void callWorkerAction(w, "log")} />
+        <Text style={styles.sectionTitle}>Upload Work Evidence</Text>
+        <Field label="Evidence description (optional)" value={evidenceDescription} onChangeText={setEvidenceDescription} placeholder="Before/after photo, invoice, issue proof..." />
+        <Button title={loading ? "Uploading..." : "Choose Photo or PDF and Upload"} disabled={loading} secondary onPress={() => void uploadWorkEvidence(w)} />
+        {evidence.length ? evidence.map((ev, i) => <Text key={String(ev.id ?? i)} style={styles.link}>{ev.file_name || ev.name || ev.title || ev.file || ev.url || "Uploaded evidence"}</Text>) : null}
+        {["in_progress", "in progress"].includes(status) ? <Button title={loading ? "Please wait..." : "✓ Mark Work Completed"} disabled={loading} onPress={() => void callWorkerAction(w, "complete")} /> : null}
+      </Card> : <Text style={styles.successText}>This work order is marked complete.</Text>}
+      <Card><Text style={styles.sectionTitle}>Work Progress History</Text>{logs.length ? logs.map((log, i) => <View key={String(log.id ?? i)} style={styles.infoRow}><Text style={styles.cardTitle}>{log.log_type || log.title || "Work update"}</Text><Text style={styles.infoValue}>{log.description || log.notes || ""}</Text><Text style={styles.muted}>{dateText(log.created_at)}</Text></View>) : <Text style={styles.muted}>No progress logs are available yet.</Text>}</Card>
+    </>;
+  };
+
   const renderContent = () => {
     switch (page) {
+      case "workerDashboard":
+        return renderWorkerDashboard();
       case "dashboard":
-        return renderDashboard();
+        return portalRole === "worker" ? renderWorkerDashboard() : renderDashboard();
       case "requests":
         return renderRequests();
       case "newRequest":
@@ -1820,9 +2058,9 @@ await api.post("/service-requests/", {
       case "requestDetails":
         return renderRequestDetails();
       case "workOrders":
-        return renderWorkOrders();
+        return portalRole === "worker" ? renderWorkerOrders() : renderWorkOrders();
       case "workOrderDetails":
-        return renderWorkOrderDetails();
+        return portalRole === "worker" ? renderWorkerOrderDetails() : renderWorkOrderDetails();
       case "notifications":
         return renderNotifications();
       case "profile":
@@ -1838,7 +2076,13 @@ await api.post("/service-requests/", {
     label: string;
     icon: string;
     target: Page;
-  }[] = [
+  }[] = portalRole === "worker" ? [
+    { label: "Dashboard", icon: "▦", target: "workerDashboard" },
+    { label: "My Work Orders", icon: "▣", target: "workOrders" },
+    { label: "Notifications", icon: "🔔", target: "notifications" },
+    { label: "Profile", icon: "👤", target: "profile" },
+    { label: "Help & Support", icon: "↗", target: "support" },
+  ] : [
     { label: "Dashboard", icon: "▦", target: "dashboard" },
     { label: "My Requests", icon: "▤", target: "requests" },
     { label: "My Work Orders", icon: "▣", target: "workOrders" },
@@ -1884,7 +2128,7 @@ await api.post("/service-requests/", {
             <>
               <Text style={styles.pageTitle}>Welcome back</Text>
               <Text style={styles.muted}>
-                Sign in to track your service requests and work progress.
+                Sign in to access your SEIYALAM portal. Worker accounts open the Worker Portal automatically.
               </Text>
 
               <Card>
@@ -2076,7 +2320,7 @@ await api.post("/service-requests/", {
               <View>
                 <Text style={styles.sidebarBrand}>{platformName}</Text>
                 <Text style={styles.sidebarSubtitle}>
-                  Customer Portal
+                  {portalRole === "worker" ? "Worker Portal" : "Customer Portal"}
                 </Text>
               </View>
 
