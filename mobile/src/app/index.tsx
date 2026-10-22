@@ -2103,79 +2103,98 @@ location_longitude: Number(coords.longitude.toFixed(6)),
     );
   }
 
-  if (!authenticated) {
-    const registering = page === "register" && allowCustomerRegistration;
 
-    return (
-      <SafeAreaView style={styles.safe}>
-        <StatusBar barStyle="light-content" backgroundColor={C.navy} />
+if (!authenticated) {
+  const registering = page === "register" && allowCustomerRegistration;
 
+  return (
+    <SafeAreaView style={styles.safe}>
+      <StatusBar
+        barStyle="light-content"
+        backgroundColor={C.navy}
+      />
+
+      <ScrollView
+        contentContainerStyle={styles.authScreen}
+        keyboardShouldPersistTaps="handled"
+        keyboardDismissMode="on-drag"
+      >
+        {/* SEIYALAM branding */}
         <View style={styles.authHeader}>
-          <Text style={styles.brand}>{platformName}</Text>
-          <Text style={styles.brandSub}>
-            Service Management Platform
-          </Text>
+          <View style={styles.logoBox}>
+            <Text style={styles.logoText}>S</Text>
+          </View>
+
+          <Text style={styles.authBrand}>{platformName}</Text>
+<Text style={styles.authSubtitle}>
+  SERVICE MANAGEMENT PLATFORM - UPDATE TEST
+</Text>
         </View>
 
-        <ScrollView
-          contentContainerStyle={styles.authPage}
-          keyboardShouldPersistTaps="handled"
-        >
+        {/* Login and registration card */}
+        <View style={styles.authCard}>
           {renderMessage()}
           {renderPlatformNotices()}
 
           {!registering ? (
             <>
               <Text style={styles.pageTitle}>Welcome back</Text>
-              <Text style={styles.muted}>
-                Sign in to access your SEIYALAM portal. Worker accounts open the Worker Portal automatically.
+
+              <Text style={styles.authDescription}>
+                Sign in to access your SEIYALAM portal. Worker
+                accounts open the Worker Portal automatically.
               </Text>
 
-              <Card>
-                <Field
-                  label="Username or Mobile Number"
-                  value={loginData.username}
-                  onChangeText={(v) =>
-                    setLoginData({ ...loginData, username: v })
-                  }
-                />
+              <Field
+                label="Username or Mobile Number"
+                value={loginData.username}
+                onChangeText={(v) =>
+                  setLoginData({ ...loginData, username: v })
+                }
+              />
 
-                <Field
-                  label="Password"
-                  value={loginData.password}
-                  onChangeText={(v) =>
-                    setLoginData({ ...loginData, password: v })
-                  }
-                  secure
-                />
+              <Field
+                label="Password"
+                value={loginData.password}
+                onChangeText={(v) =>
+                  setLoginData({ ...loginData, password: v })
+                }
+                secure
+              />
 
+              <Button
+                title={loading ? "Signing in..." : "Sign In"}
+                disabled={loading}
+                onPress={() => void login()}
+              />
+
+              <View style={styles.authDivider}>
+                <View style={styles.dividerLine} />
+
+                <Text style={styles.muted}>
+                  New to {platformName}?
+                </Text>
+
+                <View style={styles.dividerLine} />
+              </View>
+
+              {allowCustomerRegistration ? (
                 <Button
-                  title={loading ? "Signing in..." : "Sign In"}
-                  disabled={loading}
-                  onPress={() => void login()}
+                  title="Create Customer Account"
+                  secondary
+                  disabled={loading || maintenanceEnabled}
+                  onPress={() => {
+                    clearMessages();
+                    setPage("register");
+                  }}
                 />
-
-                <View style={styles.authDivider}>
-                  <Text style={styles.muted}>New to {platformName}?</Text>
-                </View>
-
-                {allowCustomerRegistration ? (
-                  <Button
-                    title="Create Customer Account"
-                    secondary
-                    disabled={loading || maintenanceEnabled}
-                    onPress={() => {
-                      clearMessages();
-                      setPage("register");
-                    }}
-                  />
-                ) : (
-                  <Text style={styles.muted}>
-                    New customer registration is currently disabled by the Founder.
-                    Please contact platform support for assistance.
-                  </Text>
-                )}
-              </Card>
+              ) : (
+                <Text style={styles.muted}>
+                  New customer registration is currently disabled
+                  by the Founder. Please contact platform support
+                  for assistance.
+                </Text>
+              )}
             </>
           ) : (
             <>
@@ -2185,101 +2204,114 @@ location_longitude: Number(coords.longitude.toFixed(6)),
                   setPage("dashboard");
                 }}
               >
-                <Text style={styles.link}>← Back to Sign In</Text>
+                <Text style={styles.link}>
+                  ← Back to Sign In
+                </Text>
               </Pressable>
 
               <Text style={styles.pageTitle}>
                 Create Customer Account
               </Text>
-              <Text style={styles.muted}>
+
+              <Text style={styles.authDescription}>
                 Register to submit and track your service requests.
               </Text>
 
-              <Card>
-                <Field
-                  label="Full Name *"
-                  value={registerData.name}
-                  onChangeText={(v) =>
-                    setRegisterData({ ...registerData, name: v })
-                  }
-                />
+              <Field
+                label="Full Name *"
+                value={registerData.name}
+                onChangeText={(v) =>
+                  setRegisterData({ ...registerData, name: v })
+                }
+              />
 
-                <Field
-                  label="Username *"
-                  value={registerData.username}
-                  onChangeText={(v) =>
-                    setRegisterData({ ...registerData, username: v })
-                  }
-                />
+              <Field
+                label="Username *"
+                value={registerData.username}
+                onChangeText={(v) =>
+                  setRegisterData({ ...registerData, username: v })
+                }
+              />
 
-                <Field
-                  label="Email"
-                  value={registerData.email}
-                  onChangeText={(v) =>
-                    setRegisterData({ ...registerData, email: v })
-                  }
-                  keyboardType="email-address"
-                />
+              <Field
+                label="Email"
+                value={registerData.email}
+                onChangeText={(v) =>
+                  setRegisterData({ ...registerData, email: v })
+                }
+                keyboardType="email-address"
+              />
 
-                <Field
-                  label="10-digit Phone *"
-                  value={registerData.phone}
-                  onChangeText={(v) =>
-                    setRegisterData({
-                      ...registerData,
-                      phone: v.replace(/\D/g, "").slice(0, 10),
-                    })
-                  }
-                  keyboardType="phone-pad"
-                />
+              <Field
+                label="10-digit Phone *"
+                value={registerData.phone}
+                onChangeText={(v) =>
+                  setRegisterData({
+                    ...registerData,
+                    phone: v.replace(/\D/g, "").slice(0, 10),
+                  })
+                }
+                keyboardType="phone-pad"
+              />
 
-                <Field
-                  label="Password (minimum 8 characters) *"
-                  value={registerData.password}
-                  onChangeText={(v) =>
-                    setRegisterData({ ...registerData, password: v })
-                  }
-                  secure
-                />
+              <Field
+                label="Password (minimum 8 characters) *"
+                value={registerData.password}
+                onChangeText={(v) =>
+                  setRegisterData({
+                    ...registerData,
+                    password: v,
+                  })
+                }
+                secure
+              />
 
-                <Field
-                  label="Confirm Password *"
-                  value={registerData.confirm_password}
-                  onChangeText={(v) =>
-                    setRegisterData({
-                      ...registerData,
-                      confirm_password: v,
-                    })
-                  }
-                  secure
-                />
+              <Field
+                label="Confirm Password *"
+                value={registerData.confirm_password}
+                onChangeText={(v) =>
+                  setRegisterData({
+                    ...registerData,
+                    confirm_password: v,
+                  })
+                }
+                secure
+              />
 
-                <Button
-                  title={loading ? "Registering..." : "Register Customer"}
-                  disabled={loading}
-                  onPress={() => void register()}
-                />
+              <Button
+                title={
+                  loading ? "Registering..." : "Register Customer"
+                }
+                disabled={loading}
+                onPress={() => void register()}
+              />
 
-                <Button
-                  title="Already have an account? Sign In"
-                  secondary
-                  disabled={loading}
-                  onPress={() => {
-                    clearMessages();
-                    setPage("dashboard");
-                  }}
-                />
-              </Card>
+              <View style={{ height: 12 }} />
+
+              <Button
+                title="Already have an account? Sign In"
+                secondary
+                disabled={loading}
+                onPress={() => {
+                  clearMessages();
+                  setPage("dashboard");
+                }}
+              />
             </>
           )}
-        </ScrollView>
-      </SafeAreaView>
-    );
-  }
+        </View>
+      </ScrollView>
+    </SafeAreaView>
+  );
+}
 
   return (
     <SafeAreaView style={styles.safe}>
-      <StatusBar barStyle="light-content" backgroundColor={C.navy} />
+      <StatusBar
+  barStyle="dark-content"
+  backgroundColor={C.white}
+  translucent={false}
+/>
 
       {renderHeader()}
 
@@ -2308,12 +2340,14 @@ location_longitude: Number(coords.longitude.toFixed(6)),
       </KeyboardAvoidingView>
 
       {/* Left navigation drawer */}
-      <Modal
-        visible={sidebar}
-        transparent
-        animationType="fade"
-        onRequestClose={() => setSidebar(false)}
-      >
+<Modal
+  visible={sidebar}
+  transparent
+  animationType="slide"
+  statusBarTranslucent={false}
+  navigationBarTranslucent={false}
+  onRequestClose={() => setSidebar(false)}
+>
         <View style={styles.overlay}>
           <View style={styles.sidebar}>
             <View style={styles.sidebarHeader}>
@@ -2623,20 +2657,24 @@ location_longitude: Number(coords.longitude.toFixed(6)),
 }
 
 const styles = StyleSheet.create({
+
   safe: {
     flex: 1,
     backgroundColor: C.background,
   },
-  header: {
-    backgroundColor: C.white,
-    minHeight: 64,
-    flexDirection: "row",
-    alignItems: "center",
-    paddingHorizontal: 14,
-    gap: 12,
-    borderBottomWidth: 1,
-    borderBottomColor: C.border,
-  },
+
+header: {
+  backgroundColor: C.white,
+  minHeight: 64,
+  flexDirection: "row",
+  alignItems: "center",
+  paddingHorizontal: 14,
+  paddingTop: 50,
+  gap: 12,
+  borderBottomWidth: 1,
+  borderBottomColor: C.border,
+},
+
   menuButton: {
     width: 40,
     height: 42,
@@ -2706,26 +2744,101 @@ const styles = StyleSheet.create({
     maxWidth: 900,
     alignSelf: "center",
   },
-  authHeader: {
-    backgroundColor: C.navy,
-    padding: 22,
-    alignItems: "center",
-  },
-  authPage: {
-    padding: 16,
-    paddingBottom: 40,
-    maxWidth: 650,
-    width: "100%",
-    alignSelf: "center",
-  },
-  pageTitle: {
-    color: C.text,
-    fontSize: 25,
-    lineHeight: 32,
-    fontWeight: "900",
-    marginTop: 8,
-    marginBottom: 4,
-  },
+
+authScreen: {
+  flexGrow: 1,
+  backgroundColor: "#07152F",
+  paddingHorizontal: 20,
+  paddingTop: 24,
+  paddingBottom: 32,
+  alignItems: "center",
+  justifyContent: "center",
+},
+
+authHeader: {
+  width: "100%",
+  alignItems: "center",
+  justifyContent: "center",
+  paddingTop: 10,
+  paddingBottom: 28,
+},
+
+logoBox: {
+  width: 68,
+  height: 68,
+  borderRadius: 20,
+  backgroundColor: "#0866F5",
+  alignItems: "center",
+  justifyContent: "center",
+  marginBottom: 12,
+},
+
+logoText: {
+  color: "#FFFFFF",
+  fontSize: 40,
+  fontWeight: "900",
+},
+
+authBrand: {
+  color: "#FFFFFF",
+  fontSize: 29,
+  fontWeight: "900",
+  letterSpacing: 1.2,
+  textAlign: "center",
+},
+
+authSubtitle: {
+  color: "#CBD5E1",
+  fontSize: 10,
+  fontWeight: "700",
+  letterSpacing: 1.2,
+  marginTop: 8,
+  textAlign: "center",
+},
+
+authPage: {
+  paddingHorizontal: 20,
+  paddingTop: 20,
+  paddingBottom: 40,
+  width: "100%",
+  maxWidth: 480,
+  alignSelf: "center",
+  flexGrow: 1,
+  justifyContent: "center",
+},
+
+authCard: {
+  width: "100%",
+  maxWidth: 480,
+  backgroundColor: "#FFFFFF",
+  borderRadius: 24,
+  padding: 22,
+  borderWidth: 1,
+  borderColor: "#E2E8F0",
+},
+
+authDescription: {
+  color: C.muted,
+  fontSize: 15,
+  lineHeight: 23,
+  marginBottom: 24,
+},
+
+dividerLine: {
+  flex: 1,
+  height: 1,
+  backgroundColor: "#D9E1EC",
+},
+
+pageTitle: {
+  color: C.text,
+  fontSize: 28,
+  lineHeight: 36,
+  fontWeight: "900",
+  marginTop: 4,
+  marginBottom: 8,
+},
+
   breadcrumb: {
     color: C.muted,
     fontSize: 12,
@@ -3036,7 +3149,7 @@ const styles = StyleSheet.create({
     width: 290,
     maxWidth: "85%",
     backgroundColor: C.navy,
-    padding: 13,
+    padding: 20,
     paddingTop: 20,
   },
   sidebarHeader: {
