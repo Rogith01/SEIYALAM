@@ -56,6 +56,8 @@ import CustomerNotifications from "./pages/customer/CustomerNotifications";
 import CustomerProfile from "./pages/customer/CustomerProfile";
 import CustomerSupport from "./pages/customer/CustomerSupport";
 
+import KnowledgeChat from "./pages/knowledge/KnowledgeChat";
+
 /*
  * Electron detection:
  * - Packaged Electron: file://
@@ -388,6 +390,16 @@ function App() {
               </CustomerLayout>
             }
           />
+
+          <Route
+  path="/founder/knowledge-chat"
+  element={<KnowledgeChat />}
+/>
+
+<Route
+  path="/admin/knowledge-chat"
+  element={<KnowledgeChat />}
+/>
 
           {/* DEFAULT */}
           <Route

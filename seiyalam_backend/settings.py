@@ -80,6 +80,7 @@ INSTALLED_APPS = [
     "work_logs",
     "api",
     "notifications",
+    "knowledge_base",
 ]
 
 
@@ -361,20 +362,14 @@ CORS_ALLOW_METHODS = [
 # ============================================================
 
 SPECTACULAR_SETTINGS = {
-
     "TITLE": "SEIYALAM API",
-
     "DESCRIPTION": (
         "Service Request, Work Order, Worker, "
         "Customer and Work Management API"
     ),
-
     "VERSION": "1.0.0",
-
     "SERVE_INCLUDE_SCHEMA": False,
-
     "COMPONENT_SPLIT_REQUEST": True,
-
     "COMPONENTS": {
         "securitySchemes": {
             "BearerAuth": {
@@ -384,7 +379,9 @@ SPECTACULAR_SETTINGS = {
             }
         }
     },
+    "SECURITY": [{"BearerAuth": []}],
 }
+
 
 
 # ============================================================

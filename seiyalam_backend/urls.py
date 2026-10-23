@@ -23,6 +23,11 @@ from rest_framework_simplejwt.views import (
 urlpatterns = [
 
     path(
+    "api/knowledge/",
+    include("knowledge_base.urls"),
+),
+
+    path(
         "admin/",
         admin.site.urls,
     ),
@@ -69,6 +74,7 @@ urlpatterns = [
         ),
         name="swagger-ui",
     ),
+
 ]
 
 if settings.DEBUG:

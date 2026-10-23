@@ -1,4 +1,4 @@
-import { LayoutDashboard, ClipboardList, Briefcase, Users, UserRound, BarChart3, Bell, Settings, LogOut, Menu, X, Wrench, FileText, Check, ExternalLink, ChevronDown, CircleUserRound } from "lucide-react";
+import { LayoutDashboard, ClipboardList, Briefcase, Users, UserRound, BarChart3, Bell, Settings, LogOut, Menu, X, Wrench, FileText, Check, ExternalLink, ChevronDown, CircleUserRound, Bot } from "lucide-react";
 
 import {
   useEffect,
@@ -110,6 +110,11 @@ function AdminLayout({ children }) {
       name: "Notifications",
       path: "/admin/notifications",
       icon: Bell,
+    },
+    {
+      name: "AI Knowledge Chat",
+      path: "/admin/knowledge-chat",
+      icon: Bot,
     },
     {
       name: "Settings",
