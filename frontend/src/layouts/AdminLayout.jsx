@@ -822,18 +822,18 @@ function AdminLayout({ children }) {
           SIDEBAR
       ================================================== */}
 
-      <aside
-        className={`
-          fixed left-0 top-0 z-50 h-screen w-64 bg-slate-900 text-white
-          transition-transform duration-300
-          lg:translate-x-0
-          ${
-            sidebarOpen
-              ? "translate-x-0"
-              : "-translate-x-full"
-          }
-        `}
-      >
+        <aside
+          className={`
+            fixed left-0 top-0 z-50 flex h-dvh w-64 flex-col overflow-hidden bg-slate-900 text-white
+            transition-transform duration-300
+            lg:translate-x-0
+            ${
+              sidebarOpen
+                ? "translate-x-0"
+                : "-translate-x-full"
+            }
+          `}
+        >
 
 
         {/* Logo */}
@@ -869,7 +869,7 @@ function AdminLayout({ children }) {
 
         {/* Navigation */}
 
-        <nav className="p-4">
+        <nav className="min-h-0 flex-1 overflow-y-auto p-4">
 
           <p className="mb-3 px-3 text-xs font-semibold uppercase tracking-wider text-slate-500">
             Main Menu
@@ -925,7 +925,7 @@ function AdminLayout({ children }) {
 
         {/* Bottom user section */}
 
-        <div className="absolute bottom-0 left-0 right-0 border-t border-slate-700 p-4">
+        <div className="shrink-0 border-t border-slate-700 bg-slate-900 p-4">
 
           <div className="mb-3 flex items-center gap-3">
 
