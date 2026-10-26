@@ -396,10 +396,6 @@ function App() {
   element={<KnowledgeChat />}
 />
 
-<Route
-  path="/admin/knowledge-chat"
-  element={<KnowledgeChat />}
-/>
 
           {/* DEFAULT */}
           <Route
