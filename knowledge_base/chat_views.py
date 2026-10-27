@@ -193,6 +193,34 @@ def _route_live_business_question(question, statistics):
     """Return direct, database-grounded answers for supported business questions."""
     text = _normalize_business_question(question)
 
+    # Answer company identity questions directly from the authorized company's
+    # database record, instead of asking the language model to infer it.
+    company = statistics.get("company") or {}
+    company_identity_question = any(term in text for term in (
+        "company name", "name of the company", "which company",
+        "what company", "company phone", "company email",
+        "company address", "company details", "company information",
+    ))
+    if company_identity_question:
+        if not company:
+            return "Company details are not available in the live business statistics."
+        if "phone" in text:
+            value = company.get("phone")
+            return f"The company phone number is {value}." if value else "The company phone number is not available."
+        if "email" in text:
+            value = company.get("email")
+            return f"The company email address is {value}." if value else "The company email address is not available."
+        if "address" in text:
+            value = company.get("address")
+            return f"The company address is {value}." if value else "The company address is not available."
+        if "details" in text or "information" in text:
+            parts = [f"Company: {company.get('name') or 'Name unavailable'}"]
+            for label, key in (("Phone", "phone"), ("Email", "email"), ("Address", "address"), ("Status", "status")):
+                if company.get(key):
+                    parts.append(f"{label}: {company[key]}")
+            return "\n".join(parts)
+        return f"The company name is {company.get('name') or 'not available in the live statistics'}."
+
     if _is_worker_workload_question(text):
         if any(term in text for term in ("completed", "finished", "most work orders completed", "most completed")):
             return _format_worker_completed_answer(statistics)

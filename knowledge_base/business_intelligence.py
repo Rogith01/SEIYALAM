@@ -1,6 +1,7 @@
 from django.db.models import Count, Q
 from django.utils import timezone
 
+from companies.models import Company
 from service_requests.models import ServiceRequest
 from work_orders.models import WorkOrder
 
@@ -15,6 +16,7 @@ def get_business_statistics(company_id):
     if not company_id:
         raise ValueError("A valid company_id is required.")
 
+    company = Company.objects.filter(pk=company_id).first()
     work_orders = WorkOrder.objects.filter(company_id=company_id)
     service_requests = ServiceRequest.objects.filter(
         company_id=company_id
@@ -67,6 +69,19 @@ def get_business_statistics(company_id):
     for worker in worker_workloads:
         worker["worker_id"] = str(worker["worker_id"])
 
+    # Include readable company identity in the live context so the assistant
+    # can answer company-name and company-contact questions accurately.
+    company_info = None
+    if company:
+        company_info = {
+            "id": str(company.pk),
+            "name": company.name,
+            "phone": getattr(company, "phone", "") or "",
+            "email": getattr(company, "email", "") or "",
+            "address": getattr(company, "address", "") or "",
+            "status": getattr(company, "status", "") or "",
+        }
+
     # Aggregate customer request volume for useful customer-insight questions.
     customer_request_counts = list(
         service_requests.filter(customer__isnull=False)
@@ -75,6 +90,19 @@ def get_business_statistics(company_id):
         .order_by("-service_request_count", "customer__username")[:10]
     )
     for customer in customer_request_counts:
+        customer["customer_id"] = str(customer["customer_id"])
+
+    # Include a compact list of customer identities for follow-up questions.
+    customer_records = list(
+        service_requests.filter(customer__isnull=False)
+        .values(
+            "customer_id", "customer__name", "customer__username",
+            "customer__email", "customer__phone",
+        )
+        .distinct()
+        .order_by("customer__username")[:50]
+    )
+    for customer in customer_records:
         customer["customer_id"] = str(customer["customer_id"])
 
     # Only calculate overdue items when this project's model has a recognized
@@ -101,6 +129,7 @@ def get_business_statistics(company_id):
 
     return {
         "company_id": str(company_id),
+        "company": company_info,
         "work_orders": {
             "total": work_orders.count(),
             "by_status": work_order_statuses,
