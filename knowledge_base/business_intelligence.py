@@ -82,29 +82,6 @@ def get_business_statistics(company_id):
             "status": getattr(company, "status", "") or "",
         }
 
-    # Aggregate customer request volume for useful customer-insight questions.
-    customer_request_counts = list(
-        service_requests.filter(customer__isnull=False)
-        .values("customer_id", "customer__name", "customer__username")
-        .annotate(service_request_count=Count("id"))
-        .order_by("-service_request_count", "customer__username")[:10]
-    )
-    for customer in customer_request_counts:
-        customer["customer_id"] = str(customer["customer_id"])
-
-    # Include a compact list of customer identities for follow-up questions.
-    customer_records = list(
-        service_requests.filter(customer__isnull=False)
-        .values(
-            "customer_id", "customer__name", "customer__username",
-            "customer__email", "customer__phone",
-        )
-        .distinct()
-        .order_by("customer__username")[:50]
-    )
-    for customer in customer_records:
-        customer["customer_id"] = str(customer["customer_id"])
-
     # Only calculate overdue items when this project's model has a recognized
     # due/deadline date field. Never guess or substitute created_at.
     overdue_work_orders = {"supported": False, "count": None, "due_field": None}
@@ -152,6 +129,44 @@ def get_business_statistics(company_id):
     for customer in customer_records:
         customer["customer_id"] = str(customer["customer_id"])
 
+    # Company-scoped request records support customer history questions.
+    request_model_fields = {field.name for field in ServiceRequest._meta.get_fields()}
+    available_related_fields = set()
+    for field in ServiceRequest._meta.get_fields():
+        if getattr(field, "is_relation", False) and getattr(field, "related_model", None):
+            for related in field.related_model._meta.get_fields():
+                available_related_fields.add(f"{field.name}__{related.name}")
+
+    request_value_fields = [
+        name for name in ("id", "title", "description", "subject", "status",
+                          "created_at", "updated_at", "priority")
+        if name in request_model_fields
+    ]
+    request_value_fields += [
+        f"customer__{name}" for name in ("name", "username", "email", "phone")
+        if f"customer__{name}" in available_related_fields
+    ]
+    request_order_fields = []
+    if "created_at" in request_model_fields:
+        request_order_fields.append("-created_at")
+    if "id" in request_model_fields:
+        request_order_fields.append("-id")
+    if "customer" in request_model_fields:
+        service_request_records = list(
+            service_requests.select_related("customer")
+            .values(*request_value_fields)
+            .order_by(*(request_order_fields or ["id"]))[:200]
+        )
+    else:
+        service_request_records = list(
+            service_requests.values(*request_value_fields)
+            .order_by(*(request_order_fields or ["id"]))[:200]
+        )
+
+    for record in service_request_records:
+        if "id" in record:
+            record["id"] = str(record["id"])
+
     unlinked_customer_request_count = service_requests.filter(customer__isnull=True).count()
 
     return {
@@ -178,6 +193,7 @@ def get_business_statistics(company_id):
         "customer_request_counts": customer_request_counts,
         "customers_with_requests": customer_records,
         "customers_with_requests_count": len(customer_records),
+        "service_request_records": service_request_records,
         "service_requests_without_customer": unlinked_customer_request_count,
         "overdue_work_orders": overdue_work_orders,
     }

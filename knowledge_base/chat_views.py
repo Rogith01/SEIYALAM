@@ -189,6 +189,123 @@ def _format_overdue_work_order_answer(statistics):
     return f"There are {count} overdue work orders currently, based on the {overdue.get('due_field')} field and excluding completed/closed work orders."
 
 
+
+def _customer_display_name(customer):
+    return customer.get("customer__name") or customer.get("customer__username") or "Unnamed customer"
+
+
+def _format_customer_list_answer(text, statistics):
+    customers = statistics.get("customers_with_requests", [])
+    counts = statistics.get("customer_request_counts", [])
+    if not customers:
+        missing = statistics.get("service_requests_without_customer", 0)
+        if missing:
+            return (
+                f"No linked customer records were found for this company's service requests. "
+                f"{missing} request(s) have no customer linked."
+            )
+        return "No customers with service requests are recorded for this company in the live statistics."
+
+    asks_phone = any(term in text for term in ("phone", "mobile", "contact number"))
+    asks_email = "email" in text
+    asks_username = "username" in text or "user name" in text
+    count_map = {str(c.get("customer_id")): int(c.get("service_request_count", 0) or 0) for c in counts}
+    lines = [f"Customers with service requests ({len(customers)}):"]
+    for customer in customers[:100]:
+        name = _customer_display_name(customer)
+        username = customer.get("customer__username")
+        customer_id = str(customer.get("customer_id"))
+        count = count_map.get(customer_id)
+        details = []
+        if asks_username and username:
+            details.append(f"username: {username}")
+        if asks_phone:
+            details.append(f"phone: {customer.get('customer__phone') or 'not available'}")
+        if asks_email:
+            details.append(f"email: {customer.get('customer__email') or 'not available'}")
+        if count is not None:
+            details.append(f"requests: {count}")
+        lines.append(f"- {name}" + (f" ({'; '.join(details)})" if details else ""))
+    unlinked = int(statistics.get("service_requests_without_customer", 0) or 0)
+    if unlinked:
+        lines.append(f"Note: {unlinked} service request(s) have no linked customer.")
+    return "\\n".join(lines)
+
+
+def _format_customer_history_answer(question, statistics):
+    text = _normalize_business_question(question)
+    customers = statistics.get("customers_with_requests", [])
+    records = statistics.get("service_request_records", [])
+    counts = statistics.get("customer_request_counts", [])
+
+    # Identify a customer by a unique name or username explicitly present in the
+    # current company-scoped statistics. Do not guess if no name matches.
+    candidates = []
+    for customer in customers:
+        name = str(customer.get("customer__name") or "").strip()
+        username = str(customer.get("customer__username") or "").strip()
+        if (name and name.lower() in text) or (username and username.lower() in text):
+            candidates.append(customer)
+    if not candidates:
+        return None
+    ids = {str(c.get("customer_id")) for c in candidates}
+    if len(ids) > 1:
+        return "More than one customer matches that name. Please ask using the customer's username."
+    customer = candidates[0]
+    customer_id = str(customer.get("customer_id"))
+    name = _customer_display_name(customer)
+
+    if "phone" in text or "mobile" in text or "contact number" in text:
+        return f"{name}'s phone number is {customer.get('customer__phone') or 'not available in the live customer data'}."
+    if "email" in text:
+        return f"{name}'s email address is {customer.get('customer__email') or 'not available in the live customer data'}."
+    if "username" in text or "user name" in text:
+        return f"{name}'s username is {customer.get('customer__username') or 'not available'}."
+
+    matched_count = next((int(c.get("service_request_count", 0) or 0)
+                          for c in counts if str(c.get("customer_id")) == customer_id), None)
+    if any(term in text for term in ("how many", "count", "number of", "total")) and any(
+        term in text for term in ("request", "ticket", "raised", "submitted")
+    ):
+        return f"{name} has {matched_count if matched_count is not None else 'an unavailable number of'} service request(s)."
+
+    customer_requests = [
+        r for r in records
+        if str(r.get("customer_id", "")) == customer_id
+        or str(r.get("customer__username", "")).lower() == str(customer.get("customer__username", "")).lower()
+    ]
+    if not customer_requests:
+        return f"{name} is linked to service requests, but individual request details are unavailable in the live statistics."
+
+    lines = [f"Service request history for {name} ({len(customer_requests)} record(s) shown):"]
+    for item in customer_requests[:30]:
+        request_id = item.get("id", "unknown")
+        status_value = item.get("status", "status unavailable")
+        title = item.get("title") or item.get("subject") or item.get("description") or "Service request"
+        title = " ".join(str(title).split())
+        if len(title) > 180:
+            title = title[:177] + "..."
+        created = item.get("created_at")
+        lines.append(f"- Request #{request_id}: {title}; status: {status_value}" + (f"; created: {created}" if created else ""))
+    if len(customer_requests) > 30:
+        lines.append("Showing the latest 30 matching request records.")
+    return "\\n".join(lines)
+
+
+def _format_worker_list_answer(statistics):
+    workers = statistics.get("worker_workloads", [])
+    if not workers:
+        return "No worker workload records are available in the live statistics."
+    lines = ["Workers with recorded work orders:"]
+    for worker in workers:
+        name = worker.get("worker__name") or worker.get("worker__username") or "Unnamed worker"
+        lines.append(
+            f"- {name}: {worker.get('total_work_orders', 0)} total, "
+            f"{worker.get('active_work_orders', 0)} active, "
+            f"{worker.get('completed_work_orders', 0)} completed"
+        )
+    return "\\n".join(lines)
+
 def _route_live_business_question(question, statistics):
     """Return direct, database-grounded answers for supported business questions."""
     text = _normalize_business_question(question)
@@ -221,6 +338,24 @@ def _route_live_business_question(question, statistics):
             return "\n".join(parts)
         return f"The company name is {company.get('name') or 'not available in the live statistics'}."
 
+    # Customer-specific details/history should be resolved before generic
+    # service-request totals, otherwise "show customers" only returns status counts.
+    customer_history_answer = _format_customer_history_answer(question, statistics)
+    if customer_history_answer is not None:
+        return customer_history_answer
+
+    asks_customer_list = any(term in text for term in (
+        "list customers", "all customers", "show customers", "show me customers",
+        "customer list", "list all customer", "customers who", "customer details",
+        "customer contact", "phone number of each customer", "email of each customer",
+        "customer names", "who are the customers", "which customers",
+    ))
+    if asks_customer_list:
+        return _format_customer_list_answer(text, statistics)
+
+    if any(term in text for term in ("list workers", "show workers", "all workers", "worker list", "who are the workers")):
+        return _format_worker_list_answer(statistics)
+
     if _is_worker_workload_question(text):
         if any(term in text for term in ("completed", "finished", "most work orders completed", "most completed")):
             return _format_worker_completed_answer(statistics)
@@ -229,8 +364,25 @@ def _route_live_business_question(question, statistics):
     if any(term in text for term in ("overdue", "past due", "past the deadline", "late work order", "late work orders")) and _is_work_order_question(text):
         return _format_overdue_work_order_answer(statistics)
 
-    if any(term in text for term in ("customer", "customers")) and _is_service_request_question(text) and any(term in text for term in ("most", "highest", "maximum", "raised the most", "submitted the most")):
+    if any(term in text for term in ("customer", "customers")) and any(
+        term in text for term in ("most", "highest", "maximum", "raised the most", "submitted the most")
+    ) and any(term in text for term in ("request", "ticket", "raised", "submitted", "customer", "customers")):
         return _format_customer_request_answer(statistics)
+
+    if any(term in text for term in ("customer", "customers")) and any(
+        term in text for term in ("how many", "count", "number", "breakdown", "each customer", "per customer")
+    ) and any(term in text for term in ("request", "ticket", "raised", "submitted")):
+        counts = statistics.get("customer_request_counts", [])
+        if not counts:
+            return "No linked customer service-request records are available in the live statistics."
+        lines = ["Service requests by customer:"]
+        for item in counts:
+            lines.append(
+                f"- {item.get('customer__name') or item.get('customer__username') or 'Unnamed customer'} "
+                f"({item.get('customer__username') or 'username unavailable'}): "
+                f"{item.get('service_request_count', 0)} request(s)"
+            )
+        return "\\n".join(lines)
 
     if _is_service_request_question(text):
         if any(term in text for term in ("why", "reason", "explain")) and any(term in text for term in ("pending", "open", "not closed", "awaiting")):
