@@ -21,34 +21,157 @@ from .retrieval import retrieve_relevant_chunks
 from .semantic_retrieval import retrieve_semantic_chunks
 
 
-def _is_work_order_count_question(question):
-    """Return True for questions asking for current work-order counts."""
-    text = " ".join((question or "").lower().replace("-", " ").split())
-    mentions_work_orders = any(term in text for term in (
+def _normalize_business_question(question):
+    """Normalize a question for deterministic live-business routing."""
+    return " ".join(
+        (question or "").lower().replace("-", " ").replace("_", " ").split()
+    )
+
+
+def _is_work_order_question(text):
+    return any(term in text for term in (
         "work order", "work orders", "workorder", "workorders",
     ))
-    asks_for_count = any(term in text for term in (
-        "how many", "count", "number of", "total", "currently active",
-        "active", "completed", "pending", "unassigned", "status",
+
+
+def _is_service_request_question(text):
+    return any(term in text for term in (
+        "service request", "service requests", "service-request",
+        "service requests", "service ticket", "service tickets",
     ))
-    return mentions_work_orders and asks_for_count
 
 
-def _format_work_order_count_answer(statistics):
-    """Build a deterministic answer from database statistics, not an LLM."""
+def _is_worker_workload_question(text):
+    worker_terms = any(term in text for term in (
+        "which worker", "what worker", "who has", "worker has",
+        "worker with", "workload", "most active", "highest number",
+        "top worker", "busiest worker",
+    ))
+    return worker_terms and (
+        "worker" in text or "workload" in text or "busiest" in text
+    )
+
+
+def _source_live_statistics():
+    return [{"name": "Live Business Statistics", "title": "Live Business Statistics"}]
+
+
+def _format_work_order_answer(text, statistics):
+    """Answer the specific work-order metric requested using database values."""
     work_orders = statistics.get("work_orders", {})
-    total = work_orders.get("total", 0)
-    active = work_orders.get("active", 0)
-    completed = work_orders.get("completed", 0)
-    unassigned = work_orders.get("unassigned", 0)
+    asks_unassigned = "unassigned" in text or "not assigned" in text
+    asks_completed = any(term in text for term in ("completed", "closed", "finished"))
+    asks_active = any(term in text for term in ("active", "in progress", "ongoing", "open"))
+    asks_total = any(term in text for term in ("how many", "count", "number", "total"))
+
+    if asks_unassigned:
+        count = work_orders.get("unassigned")
+        return f"There are {count} unassigned work orders currently." if count is not None else "The unassigned work-order count is unavailable in the live statistics."
+
+    if asks_completed and not asks_active:
+        count = work_orders.get("completed")
+        return f"There are {count} completed work orders currently." if count is not None else "The completed work-order count is unavailable in the live statistics."
+
+    if asks_active and not asks_completed:
+        count = work_orders.get("active")
+        return f"There are {count} active work orders currently." if count is not None else "The active work-order count is unavailable in the live statistics."
+
+    if asks_active and asks_completed:
+        return (
+            "Current work-order counts:\n"
+            f"- Active: {work_orders.get('active', 'unavailable')}\n"
+            f"- Completed: {work_orders.get('completed', 'unavailable')}"
+        )
+
+    if asks_total:
+        count = work_orders.get("total")
+        return f"There are {count} work orders in total currently." if count is not None else "The total work-order count is unavailable in the live statistics."
+
+    # This helper is only called for count/status questions; avoid unrelated dumps.
+    return (
+        "Current work-order counts:\n"
+        f"- Total: {work_orders.get('total', 'unavailable')}\n"
+        f"- Active: {work_orders.get('active', 'unavailable')}\n"
+        f"- Completed: {work_orders.get('completed', 'unavailable')}\n"
+        f"- Unassigned: {work_orders.get('unassigned', 'unavailable')}"
+    )
+
+
+def _format_service_request_answer(text, statistics):
+    """Answer service-request status questions using actual status counts."""
+    requests = statistics.get("service_requests", {})
+    by_status = requests.get("by_status", {})
+    normalized_statuses = {str(k).upper(): v for k, v in by_status.items()}
+
+    # Treat terminal states as closed; every other status remains open/pending.
+    terminal_statuses = {"CLOSED", "COMPLETED", "RESOLVED", "CANCELLED", "CANCELED", "REJECTED"}
+    open_count = sum(
+        count for status_name, count in normalized_statuses.items()
+        if status_name not in terminal_statuses
+    )
+
+    if any(term in text for term in ("pending", "open", "not closed", "awaiting")):
+        breakdown = ", ".join(
+            f"{name}: {count}"
+            for name, count in sorted(normalized_statuses.items())
+            if name not in terminal_statuses
+        )
+        suffix = f" Status breakdown: {breakdown}." if breakdown else ""
+        return f"There are {open_count} open/pending service requests (all statuses except closed, completed, resolved, cancelled, or rejected).{suffix}"
+
+    if any(term in text for term in ("closed", "completed", "resolved", "cancelled", "canceled")):
+        closed_count = sum(
+            count for status_name, count in normalized_statuses.items()
+            if status_name in terminal_statuses
+        )
+        return f"There are {closed_count} closed/terminal service requests currently. Status breakdown: " + ", ".join(f"{name}: {count}" for name, count in sorted(normalized_statuses.items())) + "."
 
     return (
-        "Here are the current work-order statistics from your company's database:\n\n"
-        f"- Total work orders: {total}\n"
-        f"- Active work orders: {active}\n"
-        f"- Completed work orders: {completed}\n"
-        f"- Unassigned work orders: {unassigned}"
+        f"There are {requests.get('total', 'unavailable')} service requests in total. "
+        "Current status breakdown: "
+        + (", ".join(f"{name}: {count}" for name, count in sorted(normalized_statuses.items())) or "unavailable")
+        + "."
     )
+
+
+def _format_worker_workload_answer(statistics):
+    """Name the worker with the most active work orders, when available."""
+    workers = statistics.get("worker_workloads", [])
+    if not workers:
+        return "No worker workload records are available in the live statistics."
+
+    # The business statistics are already sorted by active workload descending.
+    highest = max(int(worker.get("active_work_orders", 0) or 0) for worker in workers)
+    leaders = [worker for worker in workers if int(worker.get("active_work_orders", 0) or 0) == highest]
+    if highest == 0:
+        return "No workers currently have active work orders."
+
+    if len(leaders) == 1:
+        worker = leaders[0]
+        name = worker.get("worker__name") or worker.get("worker__username") or "Unnamed worker"
+        return f"{name} has the most active work orders, with {highest} active work order{'s' if highest != 1 else ''}."
+
+    names = [worker.get("worker__name") or worker.get("worker__username") or "Unnamed worker" for worker in leaders]
+    return f"There is a tie: {', '.join(names)} each have {highest} active work orders."
+
+
+def _route_live_business_question(question, statistics):
+    """Return a direct database-grounded answer for supported metric questions."""
+    text = _normalize_business_question(question)
+
+    if _is_worker_workload_question(text):
+        return _format_worker_workload_answer(statistics)
+
+    if _is_service_request_question(text):
+        return _format_service_request_answer(text, statistics)
+
+    if _is_work_order_question(text) and any(term in text for term in (
+        "how many", "count", "number", "total", "active", "completed",
+        "pending", "unassigned", "status", "closed", "in progress", "ongoing",
+    )):
+        return _format_work_order_answer(text, statistics)
+
+    return None
 
 
 def build_business_context(company_id):
@@ -333,17 +456,15 @@ class KnowledgeChatView(generics.GenericAPIView):
 
                 history = normalized_history
 
-            # Current work-order count questions are answered directly from
-            # the database. This avoids relying on Gemini to interpret live
-            # counts, while other questions continue through the existing RAG.
-            if _is_work_order_count_question(question):
+            # Route supported live-business questions to deterministic answers
+            # calculated from this authorized company's database. Other questions
+            # continue through the existing document RAG + Gemini flow.
+            live_answer = _route_live_business_question(question, statistics)
+            if live_answer is not None:
                 result = {
-                    "answer": _format_work_order_count_answer(statistics),
+                    "answer": live_answer,
                     "used_ai": False,
-                    "sources": [{
-                        "name": "Live Business Statistics",
-                        "title": "Live Business Statistics",
-                    }],
+                    "sources": _source_live_statistics(),
                 }
             else:
                 result = generate_rag_answer(
