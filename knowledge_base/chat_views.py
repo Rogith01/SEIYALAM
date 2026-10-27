@@ -155,19 +155,72 @@ def _format_worker_workload_answer(statistics):
     return f"There is a tie: {', '.join(names)} each have {highest} active work orders."
 
 
+def _format_worker_completed_answer(statistics):
+    workers = statistics.get("worker_workloads", [])
+    if not workers:
+        return "No worker performance records are available in the live statistics."
+    highest = max(int(worker.get("completed_work_orders", 0) or 0) for worker in workers)
+    leaders = [worker for worker in workers if int(worker.get("completed_work_orders", 0) or 0) == highest]
+    if highest == 0:
+        return "No completed work orders are recorded for the listed workers."
+    names = [worker.get("worker__name") or worker.get("worker__username") or "Unnamed worker" for worker in leaders]
+    if len(names) == 1:
+        return f"{names[0]} has completed the most work orders, with {highest} completed work order{'s' if highest != 1 else ''}."
+    return f"There is a tie: {', '.join(names)} each have {highest} completed work orders."
+
+
+def _format_customer_request_answer(statistics):
+    customers = statistics.get("customer_request_counts", [])
+    if not customers:
+        return "No customer service-request records are available in the live statistics."
+    highest = max(int(item.get("service_request_count", 0) or 0) for item in customers)
+    leaders = [item for item in customers if int(item.get("service_request_count", 0) or 0) == highest]
+    names = [item.get("customer__name") or item.get("customer__username") or "Unnamed customer" for item in leaders]
+    if len(names) == 1:
+        return f"{names[0]} has raised the most service requests, with {highest} request{'s' if highest != 1 else ''}."
+    return f"There is a tie: {', '.join(names)} have each raised {highest} service requests."
+
+
+def _format_overdue_work_order_answer(statistics):
+    overdue = statistics.get("overdue_work_orders", {})
+    if not overdue.get("supported"):
+        return "Overdue work orders cannot be calculated because this project's work-order model has no recognized due-date or deadline field. Add a due date to support this metric."
+    count = overdue.get("count")
+    return f"There are {count} overdue work orders currently, based on the {overdue.get('due_field')} field and excluding completed/closed work orders."
+
+
 def _route_live_business_question(question, statistics):
-    """Return a direct database-grounded answer for supported metric questions."""
+    """Return direct, database-grounded answers for supported business questions."""
     text = _normalize_business_question(question)
 
     if _is_worker_workload_question(text):
+        if any(term in text for term in ("completed", "finished", "most work orders completed", "most completed")):
+            return _format_worker_completed_answer(statistics)
         return _format_worker_workload_answer(statistics)
 
+    if any(term in text for term in ("overdue", "past due", "past the deadline", "late work order", "late work orders")) and _is_work_order_question(text):
+        return _format_overdue_work_order_answer(statistics)
+
+    if any(term in text for term in ("customer", "customers")) and _is_service_request_question(text) and any(term in text for term in ("most", "highest", "maximum", "raised the most", "submitted the most")):
+        return _format_customer_request_answer(statistics)
+
     if _is_service_request_question(text):
+        if any(term in text for term in ("why", "reason", "explain")) and any(term in text for term in ("pending", "open", "not closed", "awaiting")):
+            requests = statistics.get("service_requests", {})
+            statuses = {str(k).upper(): v for k, v in requests.get("by_status", {}).items()}
+            terminal = {"CLOSED", "COMPLETED", "RESOLVED", "CANCELLED", "CANCELED", "REJECTED"}
+            pending = {k: v for k, v in statuses.items() if k not in terminal}
+            if not pending:
+                return "There are no service requests in open/pending statuses in the current live statistics."
+            top_status, top_count = max(pending.items(), key=lambda item: item[1])
+            total_pending = sum(pending.values())
+            return (f"There are {total_pending} open/pending service requests. The largest pending status group is {top_status} ({top_count}). "
+                    "The live statistics show status counts, but do not record the reasons each request is waiting. Review the individual requests to identify specific blockers.")
         return _format_service_request_answer(text, statistics)
 
     if _is_work_order_question(text) and any(term in text for term in (
         "how many", "count", "number", "total", "active", "completed",
-        "pending", "unassigned", "status", "closed", "in progress", "ongoing",
+        "pending", "unassigned", "status", "closed", "in progress", "ongoing", "overdue", "past due",
     )):
         return _format_work_order_answer(text, statistics)
 
