@@ -127,6 +127,33 @@ def get_business_statistics(company_id):
             "due_field": due_field_name,
         }
 
+    # Count requests by linked customer. This is the data the chatbot needs
+    # to answer customer-name and request-volume questions deterministically.
+    customer_request_counts = list(
+        service_requests.filter(customer__isnull=False)
+        .values("customer_id", "customer__name", "customer__username")
+        .annotate(service_request_count=Count("id"))
+        .order_by("-service_request_count", "customer__name", "customer__username")[:100]
+    )
+    for customer in customer_request_counts:
+        customer["customer_id"] = str(customer["customer_id"])
+
+    # Include contact details only for customers who have requests for this
+    # company; never expose unrelated customers from other companies.
+    customer_records = list(
+        service_requests.filter(customer__isnull=False)
+        .values(
+            "customer_id", "customer__name", "customer__username",
+            "customer__email", "customer__phone",
+        )
+        .distinct()
+        .order_by("customer__name", "customer__username")[:100]
+    )
+    for customer in customer_records:
+        customer["customer_id"] = str(customer["customer_id"])
+
+    unlinked_customer_request_count = service_requests.filter(customer__isnull=True).count()
+
     return {
         "company_id": str(company_id),
         "company": company_info,
@@ -148,4 +175,9 @@ def get_business_statistics(company_id):
             "by_status": request_statuses,
         },
         "worker_workloads": worker_workloads,
+        "customer_request_counts": customer_request_counts,
+        "customers_with_requests": customer_records,
+        "customers_with_requests_count": len(customer_records),
+        "service_requests_without_customer": unlinked_customer_request_count,
+        "overdue_work_orders": overdue_work_orders,
     }
