@@ -1,12 +1,13 @@
 from django.db.models import Count, Q
 from django.utils import timezone
+from datetime import timedelta
 
 from companies.models import Company
 from service_requests.models import ServiceRequest
 from work_orders.models import WorkOrder
 
 
-def get_business_statistics(company_id):
+def get_business_statistics(company_id, start_date=None, end_date=None):
     """
     Return live, read-only business statistics for one company.
 
@@ -18,9 +19,17 @@ def get_business_statistics(company_id):
 
     company = Company.objects.filter(pk=company_id).first()
     work_orders = WorkOrder.objects.filter(company_id=company_id)
-    service_requests = ServiceRequest.objects.filter(
-        company_id=company_id
-    )
+    service_requests = ServiceRequest.objects.filter(company_id=company_id)
+
+    # Optional period filters apply to creation timestamps only. Current-state
+    # status counts are not historical snapshots; they describe records created
+    # in the requested period and their current status.
+    if start_date is not None:
+        work_orders = work_orders.filter(created_at__date__gte=start_date)
+        service_requests = service_requests.filter(created_at__date__gte=start_date)
+    if end_date is not None:
+        work_orders = work_orders.filter(created_at__date__lte=end_date)
+        service_requests = service_requests.filter(created_at__date__lte=end_date)
 
     completed_statuses = [
         WorkOrder.Status.COMPLETED,
@@ -82,6 +91,29 @@ def get_business_statistics(company_id):
             "status": getattr(company, "status", "") or "",
         }
 
+    # Aggregate customer request volume for useful customer-insight questions.
+    customer_request_counts = list(
+        service_requests.filter(customer__isnull=False)
+        .values("customer_id", "customer__name", "customer__username")
+        .annotate(service_request_count=Count("id"))
+        .order_by("-service_request_count", "customer__username")[:10]
+    )
+    for customer in customer_request_counts:
+        customer["customer_id"] = str(customer["customer_id"])
+
+    # Include a compact list of customer identities for follow-up questions.
+    customer_records = list(
+        service_requests.filter(customer__isnull=False)
+        .values(
+            "customer_id", "customer__name", "customer__username",
+            "customer__email", "customer__phone",
+        )
+        .distinct()
+        .order_by("customer__username")[:50]
+    )
+    for customer in customer_records:
+        customer["customer_id"] = str(customer["customer_id"])
+
     # Only calculate overdue items when this project's model has a recognized
     # due/deadline date field. Never guess or substitute created_at.
     overdue_work_orders = {"supported": False, "count": None, "due_field": None}
@@ -129,44 +161,6 @@ def get_business_statistics(company_id):
     for customer in customer_records:
         customer["customer_id"] = str(customer["customer_id"])
 
-    # Company-scoped request records support customer history questions.
-    request_model_fields = {field.name for field in ServiceRequest._meta.get_fields()}
-    available_related_fields = set()
-    for field in ServiceRequest._meta.get_fields():
-        if getattr(field, "is_relation", False) and getattr(field, "related_model", None):
-            for related in field.related_model._meta.get_fields():
-                available_related_fields.add(f"{field.name}__{related.name}")
-
-    request_value_fields = [
-        name for name in ("id", "title", "description", "subject", "status",
-                          "created_at", "updated_at", "priority")
-        if name in request_model_fields
-    ]
-    request_value_fields += [
-        f"customer__{name}" for name in ("name", "username", "email", "phone")
-        if f"customer__{name}" in available_related_fields
-    ]
-    request_order_fields = []
-    if "created_at" in request_model_fields:
-        request_order_fields.append("-created_at")
-    if "id" in request_model_fields:
-        request_order_fields.append("-id")
-    if "customer" in request_model_fields:
-        service_request_records = list(
-            service_requests.select_related("customer")
-            .values(*request_value_fields)
-            .order_by(*(request_order_fields or ["id"]))[:200]
-        )
-    else:
-        service_request_records = list(
-            service_requests.values(*request_value_fields)
-            .order_by(*(request_order_fields or ["id"]))[:200]
-        )
-
-    for record in service_request_records:
-        if "id" in record:
-            record["id"] = str(record["id"])
-
     unlinked_customer_request_count = service_requests.filter(customer__isnull=True).count()
 
     return {
@@ -193,7 +187,50 @@ def get_business_statistics(company_id):
         "customer_request_counts": customer_request_counts,
         "customers_with_requests": customer_records,
         "customers_with_requests_count": len(customer_records),
-        "service_request_records": service_request_records,
         "service_requests_without_customer": unlinked_customer_request_count,
         "overdue_work_orders": overdue_work_orders,
+    }
+
+def get_period_business_statistics(company_id, start_date, end_date):
+    """Return creation-period metrics for one authorized company."""
+    if not company_id or not start_date or not end_date or start_date > end_date:
+        raise ValueError("A valid company and date range are required.")
+
+    # Keep the date-range function explicit and company-scoped. This helper
+    # uses created_at, which is present on the project's current models.
+    work_orders = WorkOrder.objects.filter(
+        company_id=company_id,
+        created_at__date__gte=start_date,
+        created_at__date__lte=end_date,
+    )
+    requests = ServiceRequest.objects.filter(
+        company_id=company_id,
+        created_at__date__gte=start_date,
+        created_at__date__lte=end_date,
+    )
+    completed_statuses = [
+        WorkOrder.Status.COMPLETED,
+        WorkOrder.Status.CUSTOMER_CONFIRMED,
+        WorkOrder.Status.CLOSED,
+    ]
+    work_statuses = {
+        str(row["status"]): row["count"]
+        for row in work_orders.values("status").annotate(count=Count("id"))
+    }
+    request_statuses = {
+        str(row["status"]): row["count"]
+        for row in requests.values("status").annotate(count=Count("id"))
+    }
+    return {
+        "company_id": str(company_id),
+        "start_date": start_date.isoformat(),
+        "end_date": end_date.isoformat(),
+        "basis": "records created during this period; statuses are current statuses",
+        "service_requests": {"total": requests.count(), "by_status": request_statuses},
+        "work_orders": {
+            "total": work_orders.count(),
+            "by_status": work_statuses,
+            "completed": work_orders.filter(status__in=completed_statuses).count(),
+            "active": work_orders.exclude(status__in=completed_statuses).count(),
+        },
     }

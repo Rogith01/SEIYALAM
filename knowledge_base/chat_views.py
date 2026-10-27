@@ -1,7 +1,13 @@
 
 import json
+import csv
+import re
+from datetime import date, timedelta
+from io import StringIO, BytesIO
 
 from django.db import transaction
+from django.http import HttpResponse
+from django.utils import timezone
 from django.shortcuts import get_object_or_404
 
 from rest_framework import generics, serializers, status
@@ -10,7 +16,7 @@ from rest_framework.response import Response
 
 from companies.models import Company
 
-from .business_intelligence import get_business_statistics
+from .business_intelligence import get_business_statistics, get_period_business_statistics
 from .gemini_service import (
     GeminiServiceError,
     generate_rag_answer,
@@ -189,123 +195,6 @@ def _format_overdue_work_order_answer(statistics):
     return f"There are {count} overdue work orders currently, based on the {overdue.get('due_field')} field and excluding completed/closed work orders."
 
 
-
-def _customer_display_name(customer):
-    return customer.get("customer__name") or customer.get("customer__username") or "Unnamed customer"
-
-
-def _format_customer_list_answer(text, statistics):
-    customers = statistics.get("customers_with_requests", [])
-    counts = statistics.get("customer_request_counts", [])
-    if not customers:
-        missing = statistics.get("service_requests_without_customer", 0)
-        if missing:
-            return (
-                f"No linked customer records were found for this company's service requests. "
-                f"{missing} request(s) have no customer linked."
-            )
-        return "No customers with service requests are recorded for this company in the live statistics."
-
-    asks_phone = any(term in text for term in ("phone", "mobile", "contact number"))
-    asks_email = "email" in text
-    asks_username = "username" in text or "user name" in text
-    count_map = {str(c.get("customer_id")): int(c.get("service_request_count", 0) or 0) for c in counts}
-    lines = [f"Customers with service requests ({len(customers)}):"]
-    for customer in customers[:100]:
-        name = _customer_display_name(customer)
-        username = customer.get("customer__username")
-        customer_id = str(customer.get("customer_id"))
-        count = count_map.get(customer_id)
-        details = []
-        if asks_username and username:
-            details.append(f"username: {username}")
-        if asks_phone:
-            details.append(f"phone: {customer.get('customer__phone') or 'not available'}")
-        if asks_email:
-            details.append(f"email: {customer.get('customer__email') or 'not available'}")
-        if count is not None:
-            details.append(f"requests: {count}")
-        lines.append(f"- {name}" + (f" ({'; '.join(details)})" if details else ""))
-    unlinked = int(statistics.get("service_requests_without_customer", 0) or 0)
-    if unlinked:
-        lines.append(f"Note: {unlinked} service request(s) have no linked customer.")
-    return "\\n".join(lines)
-
-
-def _format_customer_history_answer(question, statistics):
-    text = _normalize_business_question(question)
-    customers = statistics.get("customers_with_requests", [])
-    records = statistics.get("service_request_records", [])
-    counts = statistics.get("customer_request_counts", [])
-
-    # Identify a customer by a unique name or username explicitly present in the
-    # current company-scoped statistics. Do not guess if no name matches.
-    candidates = []
-    for customer in customers:
-        name = str(customer.get("customer__name") or "").strip()
-        username = str(customer.get("customer__username") or "").strip()
-        if (name and name.lower() in text) or (username and username.lower() in text):
-            candidates.append(customer)
-    if not candidates:
-        return None
-    ids = {str(c.get("customer_id")) for c in candidates}
-    if len(ids) > 1:
-        return "More than one customer matches that name. Please ask using the customer's username."
-    customer = candidates[0]
-    customer_id = str(customer.get("customer_id"))
-    name = _customer_display_name(customer)
-
-    if "phone" in text or "mobile" in text or "contact number" in text:
-        return f"{name}'s phone number is {customer.get('customer__phone') or 'not available in the live customer data'}."
-    if "email" in text:
-        return f"{name}'s email address is {customer.get('customer__email') or 'not available in the live customer data'}."
-    if "username" in text or "user name" in text:
-        return f"{name}'s username is {customer.get('customer__username') or 'not available'}."
-
-    matched_count = next((int(c.get("service_request_count", 0) or 0)
-                          for c in counts if str(c.get("customer_id")) == customer_id), None)
-    if any(term in text for term in ("how many", "count", "number of", "total")) and any(
-        term in text for term in ("request", "ticket", "raised", "submitted")
-    ):
-        return f"{name} has {matched_count if matched_count is not None else 'an unavailable number of'} service request(s)."
-
-    customer_requests = [
-        r for r in records
-        if str(r.get("customer_id", "")) == customer_id
-        or str(r.get("customer__username", "")).lower() == str(customer.get("customer__username", "")).lower()
-    ]
-    if not customer_requests:
-        return f"{name} is linked to service requests, but individual request details are unavailable in the live statistics."
-
-    lines = [f"Service request history for {name} ({len(customer_requests)} record(s) shown):"]
-    for item in customer_requests[:30]:
-        request_id = item.get("id", "unknown")
-        status_value = item.get("status", "status unavailable")
-        title = item.get("title") or item.get("subject") or item.get("description") or "Service request"
-        title = " ".join(str(title).split())
-        if len(title) > 180:
-            title = title[:177] + "..."
-        created = item.get("created_at")
-        lines.append(f"- Request #{request_id}: {title}; status: {status_value}" + (f"; created: {created}" if created else ""))
-    if len(customer_requests) > 30:
-        lines.append("Showing the latest 30 matching request records.")
-    return "\\n".join(lines)
-
-
-def _format_worker_list_answer(statistics):
-    workers = statistics.get("worker_workloads", [])
-    if not workers:
-        return "No worker workload records are available in the live statistics."
-    lines = ["Workers with recorded work orders:"]
-    for worker in workers:
-        name = worker.get("worker__name") or worker.get("worker__username") or "Unnamed worker"
-        lines.append(
-            f"- {name}: {worker.get('total_work_orders', 0)} total, "
-            f"{worker.get('active_work_orders', 0)} active, "
-            f"{worker.get('completed_work_orders', 0)} completed"
-        )
-    return "\\n".join(lines)
-
 def _route_live_business_question(question, statistics):
     """Return direct, database-grounded answers for supported business questions."""
     text = _normalize_business_question(question)
@@ -338,73 +227,127 @@ def _route_live_business_question(question, statistics):
             return "\n".join(parts)
         return f"The company name is {company.get('name') or 'not available in the live statistics'}."
 
-    # Customer-specific details/history should be resolved before generic
-    # service-request totals, otherwise "show customers" only returns status counts.
-    customer_history_answer = _format_customer_history_answer(question, statistics)
-    if customer_history_answer is not None:
-        return customer_history_answer
 
-    asks_customer_list = any(term in text for term in (
-        "list customers", "all customers", "show customers", "show me customers",
-        "customer list", "list all customer", "customers who", "customer details",
-        "customer contact", "phone number of each customer", "email of each customer",
-        "customer names", "who are the customers", "which customers",
-    ))
-    if asks_customer_list:
-        return _format_customer_list_answer(text, statistics)
-
-    if any(term in text for term in ("list workers", "show workers", "all workers", "worker list", "who are the workers")):
-        return _format_worker_list_answer(statistics)
-
-    if _is_worker_workload_question(text):
-        if any(term in text for term in ("completed", "finished", "most work orders completed", "most completed")):
+        if _is_worker_workload_question(text):
+            return _handle_worker_workload_question(text, statistics)
+    
+    def _handle_worker_workload_question(text, statistics):
+        """Handle worker workload related questions for clarity."""
+        if any(term in text for term in (
+            "completed",
+            "finished",
+            "most work orders completed",
+            "most completed",
+        )):
             return _format_worker_completed_answer(statistics)
         return _format_worker_workload_answer(statistics)
 
-    if any(term in text for term in ("overdue", "past due", "past the deadline", "late work order", "late work orders")) and _is_work_order_question(text):
+    if any(term in text for term in (
+        "overdue",
+        "past due",
+        "past the deadline",
+        "late work order",
+        "late work orders",
+    )) and _is_work_order_question(text):
         return _format_overdue_work_order_answer(statistics)
 
-    if any(term in text for term in ("customer", "customers")) and any(
-        term in text for term in ("most", "highest", "maximum", "raised the most", "submitted the most")
-    ) and any(term in text for term in ("request", "ticket", "raised", "submitted", "customer", "customers")):
+    if (
+        any(term in text for term in ("customer", "customers"))
+        and _is_service_request_question(text)
+        and any(term in text for term in (
+            "most",
+            "highest",
+            "maximum",
+            "raised the most",
+            "submitted the most",
+        ))
+    ):
         return _format_customer_request_answer(statistics)
 
-    if any(term in text for term in ("customer", "customers")) and any(
-        term in text for term in ("how many", "count", "number", "breakdown", "each customer", "per customer")
-    ) and any(term in text for term in ("request", "ticket", "raised", "submitted")):
-        counts = statistics.get("customer_request_counts", [])
-        if not counts:
-            return "No linked customer service-request records are available in the live statistics."
-        lines = ["Service requests by customer:"]
-        for item in counts:
-            lines.append(
-                f"- {item.get('customer__name') or item.get('customer__username') or 'Unnamed customer'} "
-                f"({item.get('customer__username') or 'username unavailable'}): "
-                f"{item.get('service_request_count', 0)} request(s)"
-            )
-        return "\\n".join(lines)
-
     if _is_service_request_question(text):
-        if any(term in text for term in ("why", "reason", "explain")) and any(term in text for term in ("pending", "open", "not closed", "awaiting")):
+        if (
+            any(term in text for term in ("why", "reason", "explain"))
+            and any(term in text for term in (
+                "pending",
+                "open",
+                "not closed",
+                "awaiting",
+            ))
+        ):
             requests = statistics.get("service_requests", {})
-            statuses = {str(k).upper(): v for k, v in requests.get("by_status", {}).items()}
-            terminal = {"CLOSED", "COMPLETED", "RESOLVED", "CANCELLED", "CANCELED", "REJECTED"}
-            pending = {k: v for k, v in statuses.items() if k not in terminal}
+            statuses = {
+                str(k).upper(): v
+                for k, v in requests.get("by_status", {}).items()
+            }
+            terminal = {
+                "CLOSED",
+                "COMPLETED",
+                "RESOLVED",
+                "CANCELLED",
+                "CANCELED",
+                "REJECTED",
+            }
+            pending = {
+                k: v for k, v in statuses.items()
+                if k not in terminal
+            }
+
             if not pending:
-                return "There are no service requests in open/pending statuses in the current live statistics."
-            top_status, top_count = max(pending.items(), key=lambda item: item[1])
+                return (
+                    "There are no service requests in open/pending "
+                    "statuses in the current live statistics."
+                )
+
+            top_status, top_count = max(
+                pending.items(),
+                key=lambda item: item[1],
+            )
             total_pending = sum(pending.values())
-            return (f"There are {total_pending} open/pending service requests. The largest pending status group is {top_status} ({top_count}). "
-                    "The live statistics show status counts, but do not record the reasons each request is waiting. Review the individual requests to identify specific blockers.")
+
+            return (
+                f"There are {total_pending} open/pending service requests. "
+                f"The largest pending status group is {top_status} "
+                f"({top_count}). The live statistics show status counts, "
+                "but do not record the reasons each request is waiting. "
+                "Review the individual requests to identify specific blockers."
+            )
+
         return _format_service_request_answer(text, statistics)
 
+    # Allow active-work-order count questions to use AI with live statistics.
+    # Other supported work-order questions remain deterministic.
+    asks_active_count = (
+        "how many" in text
+        and any(term in text for term in (
+            "active",
+            "in progress",
+            "ongoing",
+        ))
+    )
+
+    if _is_work_order_question(text) and asks_active_count:
+        return None
+
     if _is_work_order_question(text) and any(term in text for term in (
-        "how many", "count", "number", "total", "active", "completed",
-        "pending", "unassigned", "status", "closed", "in progress", "ongoing", "overdue", "past due",
+        "how many",
+        "count",
+        "number",
+        "total",
+        "active",
+        "completed",
+        "pending",
+        "unassigned",
+        "status",
+        "closed",
+        "in progress",
+        "ongoing",
+        "overdue",
+        "past due",
     )):
         return _format_work_order_answer(text, statistics)
 
     return None
+
 
 
 def build_business_context(company_id):
@@ -441,6 +384,123 @@ def build_business_context(company_id):
     }
 
 
+def _parse_period(question, today=None):
+    """Resolve common natural-language periods to inclusive local dates."""
+    today = today or timezone.localdate()
+    text = _normalize_business_question(question)
+    if "last month" in text or "previous month" in text:
+        first_this = today.replace(day=1)
+        last_prev = first_this - timedelta(days=1)
+        return last_prev.replace(day=1), last_prev
+    if "this month" in text or "current month" in text:
+        return today.replace(day=1), today
+    if "last week" in text or "previous week" in text:
+        start = today - timedelta(days=today.weekday() + 7)
+        return start, start + timedelta(days=6)
+    if "this week" in text or "current week" in text:
+        start = today - timedelta(days=today.weekday())
+        return start, today
+    if "yesterday" in text:
+        day = today - timedelta(days=1)
+        return day, day
+    if "today" in text:
+        return today, today
+    match = re.search(r"(?:from )?(\d{4}-\d{2}-\d{2})\s+(?:to|through|until)\s+(\d{4}-\d{2}-\d{2})", text)
+    if match:
+        try:
+            start, end = date.fromisoformat(match.group(1)), date.fromisoformat(match.group(2))
+            if start <= end and (end - start).days <= 366:
+                return start, end
+        except ValueError:
+            pass
+    return None, None
+
+
+def _performance_summary(statistics):
+    wo = statistics.get("work_orders", {})
+    sr = statistics.get("service_requests", {})
+    overdue = statistics.get("overdue_work_orders", {})
+    lines = [
+        "Business performance summary (current database state):",
+        f"- Service requests: {sr.get('total', 'unavailable')}",
+        f"- Service request statuses: {sr.get('by_status', {})}",
+        f"- Work orders: {wo.get('total', 'unavailable')}",
+        f"- Active work orders: {wo.get('active', 'unavailable')}",
+        f"- Completed work orders: {wo.get('completed', 'unavailable')}",
+        f"- Unassigned work orders: {wo.get('unassigned', 'unavailable')}",
+    ]
+    if overdue.get("supported"):
+        lines.append(f"- Overdue work orders: {overdue.get('count')} (using {overdue.get('due_field')})")
+    else:
+        lines.append("- Overdue work orders: unavailable because no recognized due-date field exists")
+    active = int(wo.get("active", 0) or 0)
+    unassigned = int(wo.get("unassigned", 0) or 0)
+    recommendations = []
+    if unassigned:
+        recommendations.append(f"Assign or triage the {unassigned} unassigned work order(s).")
+    if overdue.get("supported") and int(overdue.get("count", 0) or 0):
+        recommendations.append("Review overdue work orders, identify blockers, and update owners or deadlines.")
+    if active:
+        recommendations.append("Review active work orders regularly and prioritize urgent customer-impacting work.")
+    if not recommendations:
+        recommendations.append("No immediate workload warning is evident from these metrics; continue monitoring status changes.")
+    lines.append("Recommendations (based only on available metrics):")
+    lines.extend(f"- {item}" for item in recommendations)
+    return "\n".join(lines)
+
+
+def _report_response(statistics, file_format):
+    """Create a downloadable company-scoped report response."""
+    if file_format == "csv":
+        output = StringIO()
+        writer = csv.writer(output)
+        writer.writerow(["section", "metric", "value"])
+        writer.writerow(["company", "company_id", statistics.get("company_id", "")])
+        for section in ("service_requests", "work_orders", "overdue_work_orders"):
+            values = statistics.get(section, {})
+            for key, value in values.items():
+                writer.writerow([section, key, json.dumps(value, ensure_ascii=False, default=str) if isinstance(value, (dict, list)) else value])
+        for worker in statistics.get("worker_workloads", []):
+            writer.writerow(["worker_workloads", worker.get("worker__name") or worker.get("worker__username") or worker.get("worker_id"), json.dumps(worker, ensure_ascii=False, default=str)])
+        response = HttpResponse(output.getvalue(), content_type="text/csv; charset=utf-8")
+        response["Content-Disposition"] = 'attachment; filename="seiyalam-business-report.csv"'
+        return response
+
+    # Use ReportLab when installed; provide a clear dependency error otherwise.
+    try:
+        from reportlab.lib.pagesizes import A4
+        from reportlab.pdfgen import canvas
+    except ImportError:
+        return Response({"detail": "PDF export requires reportlab. Add 'reportlab' to requirements.txt and redeploy."}, status=status.HTTP_501_NOT_IMPLEMENTED)
+    buffer = BytesIO()
+    pdf = canvas.Canvas(buffer, pagesize=A4)
+    width, height = A4
+    y = height - 50
+    pdf.setTitle("SEIYALAM Business Report")
+    pdf.setFont("Helvetica-Bold", 16)
+    pdf.drawString(40, y, "SEIYALAM Business Report")
+    y -= 28
+    pdf.setFont("Helvetica", 9)
+    lines = [f"Company ID: {statistics.get('company_id', '')}", "", "Service requests:"]
+    lines.extend([f"  {k}: {v}" for k, v in statistics.get("service_requests", {}).items()])
+    lines.extend(["", "Work orders:"])
+    lines.extend([f"  {k}: {v}" for k, v in statistics.get("work_orders", {}).items()])
+    lines.extend(["", "Overdue work orders:"])
+    lines.extend([f"  {k}: {v}" for k, v in statistics.get("overdue_work_orders", {}).items()])
+    lines.extend(["", "Worker workloads:"])
+    for worker in statistics.get("worker_workloads", []):
+        lines.append(f"  {worker.get('worker__name') or worker.get('worker__username') or worker.get('worker_id')}: active {worker.get('active_work_orders')}, completed {worker.get('completed_work_orders')}")
+    for line in lines:
+        if y < 45:
+            pdf.showPage(); pdf.setFont("Helvetica", 9); y = height - 45
+        pdf.drawString(40, y, str(line)[:115])
+        y -= 14
+    pdf.save()
+    response = HttpResponse(buffer.getvalue(), content_type="application/pdf")
+    response["Content-Disposition"] = 'attachment; filename="seiyalam-business-report.pdf"'
+    return response
+
+
 class KnowledgeChatSerializer(serializers.Serializer):
     question = serializers.CharField(
         min_length=2,
@@ -457,7 +517,7 @@ class KnowledgeChatSerializer(serializers.Serializer):
         min_value=1,
     )
     action = serializers.ChoiceField(
-        choices=("chat", "history", "list", "new"),
+        choices=("chat", "history", "list", "new", "export_csv", "export_pdf"),
         default="chat",
         required=False,
     )
@@ -625,7 +685,14 @@ class KnowledgeChatView(generics.GenericAPIView):
                 ],
             })
 
-        question = data["question"].strip()
+        if action in ("export_csv", "export_pdf"):
+            try:
+                statistics = get_business_statistics(company_id)
+                return _report_response(statistics, "csv" if action == "export_csv" else "pdf")
+            except Exception:
+                return Response({"detail": "The report could not be generated for this company."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        question = data.get("question", "").strip()
         mode = data.get("retrieval_mode", "keyword")
 
         try:
@@ -646,7 +713,13 @@ class KnowledgeChatView(generics.GenericAPIView):
             # Add live statistics for the already-authorized company.
             # The company ID comes from _get_company_id(), not from Gemini.
             statistics = get_business_statistics(company_id)
+            start_date, end_date = _parse_period(question)
+            period_statistics = None
+            if start_date and end_date:
+                period_statistics = get_period_business_statistics(company_id, start_date, end_date)
             business_context = build_business_context(company_id)
+            if period_statistics:
+                business_context["content"] += "\n\nDATE-RANGE BUSINESS DATA\n" + json.dumps(period_statistics, ensure_ascii=False, default=str, indent=2)
 
             all_chunks = list(chunks or [])
             all_chunks.append(business_context)
@@ -689,10 +762,71 @@ class KnowledgeChatView(generics.GenericAPIView):
 
                 history = normalized_history
 
+            # Resolve short follow-ups such as "what about last month?" from
+            # the prior stored user question, without trusting client history.
+            routing_question = question
+            if start_date and end_date and len(question.split()) <= 6 and conversation is not None:
+                previous_user = conversation.messages.filter(role=KnowledgeChatMessage.Role.USER).order_by("-created_at", "-id").first()
+                if previous_user:
+                    previous_text = previous_user.content.strip()
+                    if previous_text and previous_text.lower() != question.lower():
+                        routing_question = previous_text + " " + question
+
             # Route supported live-business questions to deterministic answers
             # calculated from this authorized company's database. Other questions
             # continue through the existing document RAG + Gemini flow.
-            live_answer = _route_live_business_question(question, statistics)
+            normalized_question = _normalize_business_question(question)
+
+            if (
+                any(
+                    term in normalized_question
+                    for term in (
+                        "business performance",
+                        "performance summary",
+                        "business summary",
+                        "recommendations",
+                        "suggest improvements",
+                        "business report",
+                    )
+                )
+                and not period_statistics
+            ):
+                live_answer = _performance_summary(statistics)
+
+            elif (
+                period_statistics
+                and (
+                    _is_service_request_question(normalized_question)
+                    or _is_work_order_question(normalized_question)
+                    or "business performance" in normalized_question
+                    or "business report" in normalized_question
+                )
+            ):
+                psr = period_statistics.get("service_requests", {})
+                pwo = period_statistics.get("work_orders", {})
+
+                live_answer = (
+                    f"Period: {start_date.isoformat()} to "
+                    f"{end_date.isoformat()} "
+                    "(records created during this period; statuses are current).\n"
+                    f"Service requests: {psr.get('total')}\n"
+                    f"Status breakdown: {psr.get('by_status')}\n"
+                    f"Work orders: {pwo.get('total')}\n"
+                    f"Active: {pwo.get('active')}\n"
+                    f"Completed: {pwo.get('completed')}\n"
+                    "Note: this is not a historical snapshot of status "
+                    "at the end of the period."
+                )
+
+            else:
+                live_answer = _route_live_business_question(
+                    question,
+                    statistics,
+                )
+
+            # Keep deterministic answers for questions explicitly handled
+            # by the live router. Otherwise, let the AI use the live
+            # statistics already included in all_chunks.
             if live_answer is not None:
                 result = {
                     "answer": live_answer,
@@ -705,7 +839,6 @@ class KnowledgeChatView(generics.GenericAPIView):
                     chunks=all_chunks,
                     history=history,
                 )
-
         except GeminiServiceError as exc:
             return Response(
                 {"detail": str(exc)},
