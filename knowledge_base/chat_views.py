@@ -447,22 +447,143 @@ def _month_comparison(company_id, today=None):
     ])
 
 
+
 def _report_response(statistics, file_format):
     """Create a downloadable company-scoped report response."""
     if file_format == "csv":
         output = StringIO()
         writer = csv.writer(output)
+
         writer.writerow(["section", "metric", "value"])
         writer.writerow(["company", "company_id", statistics.get("company_id", "")])
-        for section in ("service_requests", "work_orders", "overdue_work_orders"):
+
+        # Include report period when available.
+        for key in ("start_date", "end_date", "basis"):
+            if key in statistics:
+                writer.writerow(["report_period", key, statistics[key]])
+
+        for section in (
+            "service_requests",
+            "work_orders",
+            "overdue_work_orders",
+        ):
             values = statistics.get(section, {})
             for key, value in values.items():
-                writer.writerow([section, key, json.dumps(value, ensure_ascii=False, default=str) if isinstance(value, (dict, list)) else value])
+                if isinstance(value, (dict, list)):
+                    value = json.dumps(
+                        value,
+                        ensure_ascii=False,
+                        default=str,
+                    )
+                writer.writerow([section, key, value])
+
         for worker in statistics.get("worker_workloads", []):
-            writer.writerow(["worker_workloads", worker.get("worker__name") or worker.get("worker__username") or worker.get("worker_id"), json.dumps(worker, ensure_ascii=False, default=str)])
-        response = HttpResponse(output.getvalue(), content_type="text/csv; charset=utf-8")
-        response["Content-Disposition"] = 'attachment; filename="seiyalam-business-report.csv"'
+            worker_name = (
+                worker.get("worker__name")
+                or worker.get("worker__username")
+                or worker.get("worker_id")
+            )
+            writer.writerow([
+                "worker_workloads",
+                worker_name,
+                json.dumps(worker, ensure_ascii=False, default=str),
+            ])
+
+        response = HttpResponse(
+            "\ufeff" + output.getvalue(),
+            content_type="text/csv; charset=utf-8",
+        )
+        response["Content-Disposition"] = (
+            'attachment; filename="seiyalam-business-report.csv"'
+        )
         return response
+
+    try:
+        from reportlab.lib.pagesizes import A4
+        from reportlab.pdfgen import canvas
+    except ImportError:
+        return Response(
+            {
+                "detail": (
+                    "PDF export requires reportlab. "
+                    "Add 'reportlab' to requirements.txt and redeploy."
+                )
+            },
+            status=status.HTTP_501_NOT_IMPLEMENTED,
+        )
+
+    buffer = BytesIO()
+    pdf = canvas.Canvas(buffer, pagesize=A4)
+    _, height = A4
+    y = height - 50
+
+    pdf.setTitle("SEIYALAM Business Report")
+    pdf.setFont("Helvetica-Bold", 16)
+    pdf.drawString(40, y, "SEIYALAM Business Report")
+    y -= 28
+    pdf.setFont("Helvetica", 9)
+
+    lines = [
+        f"Company ID: {statistics.get('company_id', '')}",
+    ]
+
+    if statistics.get("start_date") or statistics.get("end_date"):
+        lines.extend([
+            f"Start date: {statistics.get('start_date', 'N/A')}",
+            f"End date: {statistics.get('end_date', 'N/A')}",
+        ])
+
+    if statistics.get("basis"):
+        lines.extend(["", f"Basis: {statistics['basis']}"])
+
+    for section in (
+        "service_requests",
+        "work_orders",
+        "overdue_work_orders",
+    ):
+        lines.extend(["", f"{section.replace('_', ' ').title()}:"])
+        values = statistics.get(section, {})
+        if values:
+            lines.extend([f"  {key}: {value}" for key, value in values.items()])
+        else:
+            lines.append("  No additional data available.")
+
+    worker_workloads = statistics.get("worker_workloads", [])
+    if worker_workloads:
+        lines.extend(["", "Worker Workloads:"])
+        for worker in worker_workloads:
+            name = (
+                worker.get("worker__name")
+                or worker.get("worker__username")
+                or worker.get("worker_id")
+                or "Unknown worker"
+            )
+            lines.append(
+                f"  {name}: active {worker.get('active_work_orders', 0)}, "
+                f"completed {worker.get('completed_work_orders', 0)}"
+            )
+
+    for line in lines:
+        if y < 45:
+            pdf.showPage()
+            pdf.setFont("Helvetica", 9)
+            y = height - 45
+
+        # Avoid ReportLab errors from unsupported characters or long lines.
+        safe_line = str(line).encode("latin-1", errors="replace").decode("latin-1")
+        pdf.drawString(40, y, safe_line[:115])
+        y -= 14
+
+    pdf.save()
+    response = HttpResponse(
+        buffer.getvalue(),
+        content_type="application/pdf",
+    )
+    response["Content-Disposition"] = (
+        'attachment; filename="seiyalam-business-report.pdf"'
+    )
+    return response
+
 
     # Use ReportLab when installed; provide a clear dependency error otherwise.
     try:
@@ -683,12 +804,29 @@ class KnowledgeChatView(generics.GenericAPIView):
                 ],
             })
 
-        if action in ("export_csv", "export_pdf"):
-            try:
-                statistics = get_business_statistics(company_id)
-                return _report_response(statistics, "csv" if action == "export_csv" else "pdf")
-            except Exception:
-                return Response({"detail": "The report could not be generated for this company."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            if action in ("export_csv", "export_pdf"):
+                try:
+                    report_question = data.get("question", "").strip()
+                    start_date, end_date = _parse_period(report_question)
+
+                    if start_date and end_date:
+                        statistics = get_period_business_statistics(
+                            company_id,
+                            start_date,
+                            end_date,
+                        )
+                    else:
+                        statistics = get_business_statistics(company_id)
+
+                    return _report_response(
+                        statistics,
+                        "csv" if action == "export_csv" else "pdf",
+                    )
+                except Exception:
+                    return Response(
+                        {"detail": "The report could not be generated for this company."},
+                        status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    )
 
         question = data.get("question", "").strip()
         mode = data.get("retrieval_mode", "keyword")

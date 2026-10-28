@@ -32,7 +32,58 @@ const getErrorMessage = (error) => {
     return "You do not have permission to access this company's knowledge.";
   }
 
+  if (typeof error?.message === "string" && error.message) {
+    return error.message;
+  }
+
   return "Something went wrong. Please try again.";
+};
+
+const downloadReport = async (postChat, action, reportQuestion = "") => {
+  const response = await postChat(
+    {
+      action,
+      question: reportQuestion.trim() || "Generate a business report",
+    },
+    { responseType: "blob" }
+  );
+
+  const contentType = response.headers?.["content-type"] || "";
+
+  // When the backend returns an error with responseType=blob, decode its JSON.
+  if (contentType.includes("application/json")) {
+    const errorText = await response.data.text();
+    let message = "The report could not be generated.";
+    try {
+      const errorData = JSON.parse(errorText);
+      message = errorData.detail || errorData.question || message;
+    } catch {
+      // Keep the fallback message when the response is not valid JSON.
+    }
+    throw new Error(message);
+  }
+
+  const blob = response.data instanceof Blob
+    ? response.data
+    : new Blob([response.data], {
+        type: action === "export_csv" ? "text/csv;charset=utf-8" : "application/pdf",
+      });
+
+  const disposition = response.headers?.["content-disposition"];
+  const filenameMatch = disposition?.match(/filename="?([^";]+)"?/i);
+  const filename = filenameMatch?.[1] ||
+    (action === "export_csv"
+      ? "seiyalam-business-report.csv"
+      : "seiyalam-business-report.pdf");
+
+  const url = window.URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  window.setTimeout(() => window.URL.revokeObjectURL(url), 1000);
 };
 
 const formatDate = (value) => {
@@ -95,11 +146,14 @@ export default function KnowledgeChat() {
   );
 
   const postChat = useCallback(
-    async (payload) =>
+    async (payload, options = {}) =>
       api.post(
         "/knowledge/chat/",
         requestPayload(payload),
-        requestConfig()
+        {
+          ...requestConfig(),
+          ...options,
+        }
       ),
     [requestConfig, requestPayload]
   );
@@ -259,35 +313,58 @@ export default function KnowledgeChat() {
     setError("");
 
     try {
-      const payload = {
-        action: "chat",
-        question: text,
-        retrieval_mode: retrievalMode,
-      };
+      const normalizedText = text.toLowerCase();
+      const asksForExport = /\b(export|download|generate)\b/.test(normalizedText) ||
+        /\bbusiness report\b/.test(normalizedText);
+      const wantsCsv = /\bcsv\b/.test(normalizedText);
+      const wantsPdf = /\bpdf\b/.test(normalizedText);
 
-      if (conversationId) {
-        payload.conversation_id = conversationId;
+      if (asksForExport && (wantsCsv || wantsPdf)) {
+        const action = wantsCsv ? "export_csv" : "export_pdf";
+        await downloadReport(postChat, action, text);
+
+        setMessages((current) => [
+          ...current.filter((item) => item.id !== optimisticMessage.id),
+          optimisticMessage,
+          {
+            id: `answer-${Date.now()}`,
+            role: "assistant",
+            content: `Your ${wantsCsv ? "CSV" : "PDF"} business report has been downloaded.`,
+            sources: [],
+            created_at: new Date().toISOString(),
+          },
+        ]);
+      } else {
+        const payload = {
+          action: "chat",
+          question: text,
+          retrieval_mode: retrievalMode,
+        };
+
+        if (conversationId) {
+          payload.conversation_id = conversationId;
+        }
+
+        const response = await postChat(payload);
+        const result = response.data;
+
+        setConversationId(result.conversation_id);
+
+        setMessages((current) => [
+          ...current.filter((item) => item.id !== optimisticMessage.id),
+          optimisticMessage,
+          {
+            id: `answer-${Date.now()}`,
+            role: "assistant",
+            content: result.answer,
+            sources: result.sources || [],
+            used_ai: result.used_ai,
+            created_at: new Date().toISOString(),
+          },
+        ]);
+
+        await loadConversations();
       }
-
-      const response = await postChat(payload);
-      const result = response.data;
-
-      setConversationId(result.conversation_id);
-
-      setMessages((current) => [
-        ...current.filter((item) => item.id !== optimisticMessage.id),
-        optimisticMessage,
-        {
-          id: `answer-${Date.now()}`,
-          role: "assistant",
-          content: result.answer,
-          sources: result.sources || [],
-          used_ai: result.used_ai,
-          created_at: new Date().toISOString(),
-        },
-      ]);
-
-      await loadConversations();
     } catch (err) {
       setMessages((current) =>
         current.filter((item) => item.id !== optimisticMessage.id)
