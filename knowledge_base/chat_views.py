@@ -743,6 +743,36 @@ class KnowledgeChatView(generics.GenericAPIView):
 
         action = data.get("action", "chat")
 
+        # Generate downloadable reports before normal chat handling.
+        # Company access has already been checked by _get_company_id().
+        if action in ("export_csv", "export_pdf"):
+            try:
+                report_question = data.get("question", "").strip()
+                start_date, end_date = _parse_period(report_question)
+
+                if start_date and end_date:
+                    statistics = get_period_business_statistics(
+                        company_id,
+                        start_date,
+                        end_date,
+                    )
+                else:
+                    statistics = get_business_statistics(company_id)
+
+                return _report_response(
+                    statistics,
+                    "csv" if action == "export_csv" else "pdf",
+                )
+            except Exception:
+                return Response(
+                    {
+                        "detail": (
+                            "The report could not be generated for this company."
+                        )
+                    },
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                )
+
         # List only conversations belonging to this user and company.
         if action == "list":
             conversations = self._conversation_queryset(
@@ -803,30 +833,6 @@ class KnowledgeChatView(generics.GenericAPIView):
                     for message in messages
                 ],
             })
-
-            if action in ("export_csv", "export_pdf"):
-                try:
-                    report_question = data.get("question", "").strip()
-                    start_date, end_date = _parse_period(report_question)
-
-                    if start_date and end_date:
-                        statistics = get_period_business_statistics(
-                            company_id,
-                            start_date,
-                            end_date,
-                        )
-                    else:
-                        statistics = get_business_statistics(company_id)
-
-                    return _report_response(
-                        statistics,
-                        "csv" if action == "export_csv" else "pdf",
-                    )
-                except Exception:
-                    return Response(
-                        {"detail": "The report could not be generated for this company."},
-                        status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    )
 
         question = data.get("question", "").strip()
         mode = data.get("retrieval_mode", "keyword")
