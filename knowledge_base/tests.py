@@ -516,6 +516,7 @@ class SemanticRetrievalTests(TestCase):
         )
 
 
+
 class KnowledgeChatAPITests(TestCase):
     @classmethod
     def setUpTestData(cls):
@@ -601,6 +602,7 @@ class KnowledgeChatAPITests(TestCase):
                 }
             ],
         }
+
         self.client.force_authenticate(user=self.admin_a)
 
         response = self.client.post(
@@ -610,18 +612,80 @@ class KnowledgeChatAPITests(TestCase):
         )
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.data["company_id"], self.company_a.id)
-        self.assertEqual(response.data["answer"], "Use procedure Alpha. [Source 1]")
+        self.assertEqual(
+            response.data["company_id"],
+            self.company_a.id,
+        )
+        self.assertEqual(
+            response.data["answer"],
+            "Use procedure Alpha. [Source 1]",
+        )
         self.assertTrue(response.data["used_ai"])
         self.assertEqual(len(response.data["sources"]), 1)
 
         mock_answer.assert_called_once()
+
+        chunks = mock_answer.call_args.kwargs["chunks"]
+
         self.assertTrue(
             all(
                 chunk["company_id"] == self.company_a.id
-                for chunk in mock_answer.call_args.kwargs["chunks"]
+                for chunk in chunks
             )
         )
+
+    @patch("knowledge_base.chat_views.generate_rag_answer")
+    def test_admin_chat_passes_live_business_statistics(self, mock_answer):
+        mock_answer.return_value = {
+            "answer": "There are 10 active work orders.",
+            "used_ai": True,
+            "sources": [],
+        }
+
+        self.client.force_authenticate(user=self.admin_a)
+
+        response = self.client.post(
+            self.url,
+            {
+                "question": "How many work orders are currently active?",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.data["company_id"],
+            self.company_a.id,
+        )
+
+        mock_answer.assert_called_once()
+
+        chunks = mock_answer.call_args.kwargs["chunks"]
+
+        live_contexts = [
+            chunk
+            for chunk in chunks
+            if (
+                isinstance(chunk, dict)
+                and chunk.get("metadata", {}).get("type")
+                == "live_business_statistics"
+            )
+        ]
+
+        self.assertEqual(
+            len(live_contexts),
+            1,
+            "Expected exactly one live business statistics context.",
+        )
+
+        live_context = live_contexts[0]["content"]
+
+        self.assertIn(
+            "LIVE BUSINESS INTELLIGENCE DATA",
+            live_context,
+        )
+        self.assertIn('"company_id":', live_context)
+        self.assertIn('"active":', live_context)
 
     @patch("knowledge_base.chat_views.generate_rag_answer")
     def test_admin_cannot_chat_with_another_company(self, mock_answer):
@@ -659,6 +723,7 @@ class KnowledgeChatAPITests(TestCase):
             "used_ai": True,
             "sources": [],
         }
+
         self.client.force_authenticate(user=self.founder)
 
         response = self.client.post(
@@ -671,9 +736,13 @@ class KnowledgeChatAPITests(TestCase):
         )
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.data["company_id"], self.company_b.id)
+        self.assertEqual(
+            response.data["company_id"],
+            self.company_b.id,
+        )
 
         mock_answer.assert_called_once()
+
         self.assertTrue(
             all(
                 chunk["company_id"] == self.company_b.id
@@ -725,6 +794,7 @@ class KnowledgeChatAPITests(TestCase):
         mock_answer.side_effect = GeminiServiceError(
             "The AI service is busy or its usage limit was reached. Please try again later."
         )
+
         self.client.force_authenticate(user=self.admin_a)
 
         response = self.client.post(
@@ -757,6 +827,7 @@ class KnowledgeChatAPITests(TestCase):
                 }
             ],
         }
+
         self.client.force_authenticate(user=self.admin_a)
 
         response = self.client.post(
@@ -771,16 +842,32 @@ class KnowledgeChatAPITests(TestCase):
         conversation = KnowledgeConversation.objects.get(
             pk=response.data["conversation_id"]
         )
-        self.assertEqual(conversation.user, self.admin_a)
-        self.assertEqual(conversation.company_id, self.company_a.id)
 
-        messages = list(conversation.messages.order_by("created_at", "id"))
+        self.assertEqual(conversation.user, self.admin_a)
+        self.assertEqual(
+            conversation.company_id,
+            self.company_a.id,
+        )
+
+        messages = list(
+            conversation.messages.order_by("created_at", "id")
+        )
+
         self.assertEqual(len(messages), 2)
         self.assertEqual(messages[0].role, "user")
-        self.assertEqual(messages[0].content, "How are repairs handled?")
+        self.assertEqual(
+            messages[0].content,
+            "How are repairs handled?",
+        )
         self.assertEqual(messages[1].role, "assistant")
-        self.assertEqual(messages[1].content, "Use procedure Alpha. [Source 1]")
-        self.assertEqual(messages[1].sources, response.data["sources"])
+        self.assertEqual(
+            messages[1].content,
+            "Use procedure Alpha. [Source 1]",
+        )
+        self.assertEqual(
+            messages[1].sources,
+            response.data["sources"],
+        )
 
     @patch("knowledge_base.chat_views.generate_rag_answer")
     def test_user_can_reload_conversation_history(self, mock_answer):
@@ -791,16 +878,23 @@ class KnowledgeChatAPITests(TestCase):
             company=self.company_a,
             title="Repair questions",
         )
+
         KnowledgeChatMessage.objects.create(
             conversation=conversation,
             role="user",
             content="How are repairs handled?",
         )
+
         KnowledgeChatMessage.objects.create(
             conversation=conversation,
             role="assistant",
             content="Use procedure Alpha.",
-            sources=[{"source_id": 1, "title": "Company A Chat Manual"}],
+            sources=[
+                {
+                    "source_id": 1,
+                    "title": "Company A Chat Manual",
+                }
+            ],
         )
 
         response = self.client.post(
@@ -813,12 +907,17 @@ class KnowledgeChatAPITests(TestCase):
         )
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.data["conversation_id"], conversation.id)
+        self.assertEqual(
+            response.data["conversation_id"],
+            conversation.id,
+        )
         self.assertEqual(len(response.data["messages"]), 2)
+
         self.assertEqual(
             response.data["messages"][1]["sources"][0]["title"],
             "Company A Chat Manual",
         )
+
         mock_answer.assert_not_called()
 
     @patch("knowledge_base.chat_views.generate_rag_answer")
@@ -853,6 +952,7 @@ class KnowledgeChatAPITests(TestCase):
             company=self.company_a,
             title="My conversation",
         )
+
         KnowledgeConversation.objects.create(
             user=self.admin_b,
             company=self.company_b,
@@ -866,8 +966,10 @@ class KnowledgeChatAPITests(TestCase):
         )
 
         self.assertEqual(response.status_code, 200)
+
         self.assertEqual(
             [item["id"] for item in response.data["conversations"]],
             [own_conversation.id],
         )
+
         mock_answer.assert_not_called()

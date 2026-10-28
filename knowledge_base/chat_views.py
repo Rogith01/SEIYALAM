@@ -227,127 +227,53 @@ def _route_live_business_question(question, statistics):
             return "\n".join(parts)
         return f"The company name is {company.get('name') or 'not available in the live statistics'}."
 
-
-        if _is_worker_workload_question(text):
-            return _handle_worker_workload_question(text, statistics)
-    
-    def _handle_worker_workload_question(text, statistics):
-        """Handle worker workload related questions for clarity."""
-        if any(term in text for term in (
-            "completed",
-            "finished",
-            "most work orders completed",
-            "most completed",
-        )):
+    if _is_worker_workload_question(text):
+        if any(term in text for term in ("completed", "finished", "most work orders completed", "most completed")):
             return _format_worker_completed_answer(statistics)
         return _format_worker_workload_answer(statistics)
 
-    if any(term in text for term in (
-        "overdue",
-        "past due",
-        "past the deadline",
-        "late work order",
-        "late work orders",
-    )) and _is_work_order_question(text):
+    if any(term in text for term in ("overdue", "past due", "past the deadline", "late work order", "late work orders")) and _is_work_order_question(text):
         return _format_overdue_work_order_answer(statistics)
 
-    if (
-        any(term in text for term in ("customer", "customers"))
-        and _is_service_request_question(text)
-        and any(term in text for term in (
-            "most",
-            "highest",
-            "maximum",
-            "raised the most",
-            "submitted the most",
-        ))
-    ):
+    if any(term in text for term in ("customer", "customers")) and _is_service_request_question(text) and any(term in text for term in ("most", "highest", "maximum", "raised the most", "submitted the most")):
         return _format_customer_request_answer(statistics)
 
     if _is_service_request_question(text):
-        if (
-            any(term in text for term in ("why", "reason", "explain"))
-            and any(term in text for term in (
-                "pending",
-                "open",
-                "not closed",
-                "awaiting",
-            ))
-        ):
+        if any(term in text for term in ("why", "reason", "explain")) and any(term in text for term in ("pending", "open", "not closed", "awaiting")):
             requests = statistics.get("service_requests", {})
-            statuses = {
-                str(k).upper(): v
-                for k, v in requests.get("by_status", {}).items()
-            }
-            terminal = {
-                "CLOSED",
-                "COMPLETED",
-                "RESOLVED",
-                "CANCELLED",
-                "CANCELED",
-                "REJECTED",
-            }
-            pending = {
-                k: v for k, v in statuses.items()
-                if k not in terminal
-            }
-
+            statuses = {str(k).upper(): v for k, v in requests.get("by_status", {}).items()}
+            terminal = {"CLOSED", "COMPLETED", "RESOLVED", "CANCELLED", "CANCELED", "REJECTED"}
+            pending = {k: v for k, v in statuses.items() if k not in terminal}
             if not pending:
-                return (
-                    "There are no service requests in open/pending "
-                    "statuses in the current live statistics."
-                )
-
-            top_status, top_count = max(
-                pending.items(),
-                key=lambda item: item[1],
-            )
+                return "There are no service requests in open/pending statuses in the current live statistics."
+            top_status, top_count = max(pending.items(), key=lambda item: item[1])
             total_pending = sum(pending.values())
-
-            return (
-                f"There are {total_pending} open/pending service requests. "
-                f"The largest pending status group is {top_status} "
-                f"({top_count}). The live statistics show status counts, "
-                "but do not record the reasons each request is waiting. "
-                "Review the individual requests to identify specific blockers."
-            )
-
+            return (f"There are {total_pending} open/pending service requests. The largest pending status group is {top_status} ({top_count}). "
+                    "The live statistics show status counts, but do not record the reasons each request is waiting. Review the individual requests to identify specific blockers.")
         return _format_service_request_answer(text, statistics)
 
-    # Allow active-work-order count questions to use AI with live statistics.
-    # Other supported work-order questions remain deterministic.
-    asks_active_count = (
-        "how many" in text
-        and any(term in text for term in (
-            "active",
-            "in progress",
-            "ongoing",
-        ))
-    )
-
-    if _is_work_order_question(text) and asks_active_count:
-        return None
-
     if _is_work_order_question(text) and any(term in text for term in (
-        "how many",
-        "count",
-        "number",
-        "total",
-        "active",
-        "completed",
-        "pending",
-        "unassigned",
-        "status",
-        "closed",
-        "in progress",
-        "ongoing",
-        "overdue",
-        "past due",
+        "how many", "count", "number", "total", "active", "completed",
+        "pending", "unassigned", "status", "closed", "in progress",
+        "ongoing", "overdue", "past due",
     )):
+        # Keep active-work-order count questions in the RAG flow so the
+        # model receives the live business statistics context. Other supported
+        # work-order questions continue to use deterministic answers.
+        if "active" in text and any(
+            phrase in text
+            for phrase in (
+                "how many work orders",
+                "number of work orders",
+                "count of work orders",
+                "total work orders",
+            )
+        ):
+            return None
+
         return _format_work_order_answer(text, statistics)
 
     return None
-
 
 
 def build_business_context(company_id):
@@ -388,6 +314,15 @@ def _parse_period(question, today=None):
     """Resolve common natural-language periods to inclusive local dates."""
     today = today or timezone.localdate()
     text = _normalize_business_question(question)
+
+    # Rolling windows such as "last 7 days" include today and the six
+    # preceding calendar dates. Match these before named calendar periods.
+    rolling = re.search(r"(?:last|past)\s+(\d{1,3})\s+days?", text)
+    if rolling:
+        days = int(rolling.group(1))
+        if 1 <= days <= 366:
+            return today - timedelta(days=days - 1), today
+
     if "last month" in text or "previous month" in text:
         first_this = today.replace(day=1)
         last_prev = first_this - timedelta(days=1)
@@ -417,13 +352,17 @@ def _parse_period(question, today=None):
 
 
 def _performance_summary(statistics):
+    """Summarize measured metrics and give up to five actionable suggestions."""
     wo = statistics.get("work_orders", {})
     sr = statistics.get("service_requests", {})
     overdue = statistics.get("overdue_work_orders", {})
+    workers = statistics.get("worker_workloads", [])
+    request_statuses = sr.get("by_status", {}) or {}
+
     lines = [
         "Business performance summary (current database state):",
         f"- Service requests: {sr.get('total', 'unavailable')}",
-        f"- Service request statuses: {sr.get('by_status', {})}",
+        f"- Service request statuses: {request_statuses}",
         f"- Work orders: {wo.get('total', 'unavailable')}",
         f"- Active work orders: {wo.get('active', 'unavailable')}",
         f"- Completed work orders: {wo.get('completed', 'unavailable')}",
@@ -433,20 +372,79 @@ def _performance_summary(statistics):
         lines.append(f"- Overdue work orders: {overdue.get('count')} (using {overdue.get('due_field')})")
     else:
         lines.append("- Overdue work orders: unavailable because no recognized due-date field exists")
+
     active = int(wo.get("active", 0) or 0)
+    completed = int(wo.get("completed", 0) or 0)
     unassigned = int(wo.get("unassigned", 0) or 0)
+    total_requests = int(sr.get("total", 0) or 0)
+    assigned_requests = sum(
+        int(count or 0) for name, count in request_statuses.items()
+        if str(name).upper() in {"ASSIGNED", "IN_PROGRESS", "IN PROGRESS"}
+    )
+    new_requests = sum(
+        int(count or 0) for name, count in request_statuses.items()
+        if str(name).upper() in {"NEW", "OPEN", "PENDING"}
+    )
     recommendations = []
     if unassigned:
         recommendations.append(f"Assign or triage the {unassigned} unassigned work order(s).")
     if overdue.get("supported") and int(overdue.get("count", 0) or 0):
-        recommendations.append("Review overdue work orders, identify blockers, and update owners or deadlines.")
+        recommendations.append("Review overdue work orders, identify blockers, and agree on updated owners or deadlines.")
     if active:
-        recommendations.append("Review active work orders regularly and prioritize urgent customer-impacting work.")
-    if not recommendations:
-        recommendations.append("No immediate workload warning is evident from these metrics; continue monitoring status changes.")
-    lines.append("Recommendations (based only on available metrics):")
-    lines.extend(f"- {item}" for item in recommendations)
+        recommendations.append(f"Review the {active} active work order(s) in a daily priority queue, starting with urgent customer-impacting work.")
+    if new_requests:
+        recommendations.append(f"Triage the {new_requests} new/open/pending service request(s) and assign an owner or next action.")
+    if total_requests and assigned_requests:
+        recommendations.append(f"Check progress and customer updates for the {assigned_requests} service request(s) in assigned/in-progress statuses.")
+    if completed and wo.get("total"):
+        recommendations.append("Review completion quality and confirm customers are informed when work is finished.")
+    if workers:
+        recommendations.append("Review worker workloads and redistribute tasks if one worker has substantially more active work than others.")
+
+    # Keep the requested five recommendations where the available data supports
+    # them. Generic process advice is clearly framed as a suggestion, not a fact.
+    fallback = [
+        "Record a due date and priority for each new work order so overdue work can be measured reliably.",
+        "Review the status board weekly and resolve records that have not changed for several days.",
+        "Track request creation and completion by date to build reliable month-to-month comparisons.",
+    ]
+    for item in fallback:
+        if len(recommendations) >= 5:
+            break
+        recommendations.append(item)
+    recommendations = recommendations[:5]
+    lines.append("Recommendations (based on available metrics and clearly labelled process suggestions):")
+    lines.extend(f"{index}. {item}" for index, item in enumerate(recommendations, 1))
     return "\n".join(lines)
+
+
+def _month_comparison(company_id, today=None):
+    """Compare records created this month with the previous calendar month."""
+    today = today or timezone.localdate()
+    current_start = today.replace(day=1)
+    previous_end = current_start - timedelta(days=1)
+    previous_start = previous_end.replace(day=1)
+    current = get_period_business_statistics(company_id, current_start, today)
+    previous = get_period_business_statistics(company_id, previous_start, previous_end)
+
+    def delta(current_value, previous_value):
+        difference = int(current_value or 0) - int(previous_value or 0)
+        if difference > 0:
+            return f"up by {difference}"
+        if difference < 0:
+            return f"down by {abs(difference)}"
+        return "unchanged"
+
+    cwo, pwo = current["work_orders"], previous["work_orders"]
+    csr, psr = current["service_requests"], previous["service_requests"]
+    return "\n".join([
+        "Business comparison (records created in each period; statuses are current):",
+        f"This month ({current_start.isoformat()} to {today.isoformat()}): {cwo['total']} work orders; {csr['total']} service requests.",
+        f"Last month ({previous_start.isoformat()} to {previous_end.isoformat()}): {pwo['total']} work orders; {psr['total']} service requests.",
+        f"Work orders: {delta(cwo['total'], pwo['total'])} compared with last month.",
+        f"Service requests: {delta(csr['total'], psr['total'])} compared with last month.",
+        "This compares creation counts, not historical status snapshots or a full-month forecast.",
+    ])
 
 
 def _report_response(statistics, file_format):
@@ -777,56 +775,32 @@ class KnowledgeChatView(generics.GenericAPIView):
             # continue through the existing document RAG + Gemini flow.
             normalized_question = _normalize_business_question(question)
 
-            if (
-                any(
-                    term in normalized_question
-                    for term in (
-                        "business performance",
-                        "performance summary",
-                        "business summary",
-                        "recommendations",
-                        "suggest improvements",
-                        "business report",
-                    )
+            # Comparison must calculate both periods; a single parsed period
+            # cannot answer a month-to-month comparison correctly.
+            if any(term in normalized_question for term in ("compare", "comparison", "compared with", "versus", " vs ")) and any(term in normalized_question for term in ("this month", "last month", "work orders", "service requests", "business")):
+                live_answer = _month_comparison(company_id)
+            elif any(term in normalized_question for term in ("can you make pdf", "can you generate pdf", "make pdf report", "generate pdf", "export as pdf", "export to pdf")):
+                live_answer = (
+                    "Yes. SEIYALAM has a company-scoped PDF report export action. "
+                    "The chat message itself does not trigger a file download unless the frontend sends action='export_pdf' and handles the returned PDF attachment. "
+                    "Use the Reports/Export control if available; otherwise the chat frontend needs that button wired to the export action."
                 )
-                and not period_statistics
-            ):
+            elif any(term in normalized_question for term in ("export as csv", "export to csv", "download csv", "generate csv", "export csv")):
+                live_answer = (
+                    "CSV export is supported by the backend through action='export_csv'. "
+                    "The frontend must send that action and handle the returned file attachment; a normal chat question alone returns a chat response."
+                )
+            elif any(term in normalized_question for term in ("business performance", "performance summary", "business summary", "recommendations", "suggest improvements", "business report", "analyze my business")) and not period_statistics:
                 live_answer = _performance_summary(statistics)
-
-            elif (
-                period_statistics
-                and (
-                    _is_service_request_question(normalized_question)
-                    or _is_work_order_question(normalized_question)
-                    or "business performance" in normalized_question
-                    or "business report" in normalized_question
-                )
-            ):
+            elif period_statistics and (_is_service_request_question(normalized_question) or _is_work_order_question(normalized_question) or "business performance" in normalized_question or "business report" in normalized_question):
                 psr = period_statistics.get("service_requests", {})
                 pwo = period_statistics.get("work_orders", {})
-
-                live_answer = (
-                    f"Period: {start_date.isoformat()} to "
-                    f"{end_date.isoformat()} "
-                    "(records created during this period; statuses are current).\n"
-                    f"Service requests: {psr.get('total')}\n"
-                    f"Status breakdown: {psr.get('by_status')}\n"
-                    f"Work orders: {pwo.get('total')}\n"
-                    f"Active: {pwo.get('active')}\n"
-                    f"Completed: {pwo.get('completed')}\n"
-                    "Note: this is not a historical snapshot of status "
-                    "at the end of the period."
-                )
-
+                live_answer = (f"Period: {start_date.isoformat()} to {end_date.isoformat()} (records created during this period; statuses are current).\n"
+                    f"Service requests: {psr.get('total')}\nStatus breakdown: {psr.get('by_status')}\n"
+                    f"Work orders: {pwo.get('total')}\nActive: {pwo.get('active')}\nCompleted: {pwo.get('completed')}\n"
+                    "Note: this is not a historical snapshot of status at the end of the period.")
             else:
-                live_answer = _route_live_business_question(
-                    question,
-                    statistics,
-                )
-
-            # Keep deterministic answers for questions explicitly handled
-            # by the live router. Otherwise, let the AI use the live
-            # statistics already included in all_chunks.
+                live_answer = _route_live_business_question(question, statistics)
             if live_answer is not None:
                 result = {
                     "answer": live_answer,
@@ -839,6 +813,7 @@ class KnowledgeChatView(generics.GenericAPIView):
                     chunks=all_chunks,
                     history=history,
                 )
+
         except GeminiServiceError as exc:
             return Response(
                 {"detail": str(exc)},
