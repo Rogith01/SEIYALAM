@@ -169,6 +169,10 @@ DATABASES = {
             "sys",
         ),
 
+        "TEST": {
+            "NAME": "test_seiyalam_bi_ti_fix_20261026",
+        },
+
         "USER": os.getenv(
             "DB_USER",
             "root",

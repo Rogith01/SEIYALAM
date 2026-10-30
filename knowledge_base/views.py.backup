@@ -1,0 +1,133 @@
+
+import os
+
+from django.conf import settings
+from django.core.exceptions import ValidationError
+from django.db.models import Q
+
+from rest_framework import generics, status
+from rest_framework.parsers import FormParser, MultiPartParser
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+
+from companies.models import Company, PlatformSettings
+
+from .models import CompanyDocument
+from .permissions import IsCompanyKnowledgeAdmin
+from .serializers import CompanyDocumentSerializer
+
+
+class CompanyDocumentListCreateView(generics.ListCreateAPIView):
+    """
+    GET  /api/knowledge/documents/  - list accessible documents
+    POST /api/knowledge/documents/  - upload a PDF
+    """
+
+    serializer_class = CompanyDocumentSerializer
+    permission_classes = [IsAuthenticated, IsCompanyKnowledgeAdmin]
+    parser_classes = [MultiPartParser, FormParser]
+
+    def get_queryset(self):
+        user = self.request.user
+
+        # Admins are strictly limited to their own company.
+        if user.role == "ADMIN":
+            return CompanyDocument.objects.filter(
+                company_id=user.company_id
+            ).select_related("company", "uploaded_by")
+
+        # A founder must select an existing company through the
+        # company_id request parameter. Only listed companies
+        # will be visible in this request.
+        if user.role == "FOUNDER":
+            company_id = self.request.query_params.get("company_id")
+
+            if not company_id or not company_id.isdigit():
+                return CompanyDocument.objects.none()
+
+            return CompanyDocument.objects.filter(
+                company_id=int(company_id)
+            ).select_related("company", "uploaded_by")
+
+        return CompanyDocument.objects.none()
+
+    def create(self, request, *args, **kwargs):
+        user = request.user
+
+        if user.role == "ADMIN":
+            company = user.company
+            if company is None:
+                return Response(
+                    {"detail": "Your account is not linked to a company."},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+
+        elif user.role == "FOUNDER":
+            company_id = request.data.get("company_id")
+
+            if not company_id:
+                return Response(
+                    {"company_id": "This field is required for a founder."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            try:
+                company = Company.objects.get(pk=int(company_id))
+            except (Company.DoesNotExist, TypeError, ValueError):
+                return Response(
+                    {"company_id": "Select a valid company."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+        else:
+            return Response(
+                {"detail": "You cannot upload company documents."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        uploaded_file = request.FILES.get("file")
+
+        if uploaded_file is None:
+            return Response(
+                {"file": "Please attach a PDF file."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            platform_settings = PlatformSettings.get_settings()
+            max_size_mb = platform_settings.max_upload_size_mb
+        except Exception:
+            max_size_mb = 10
+
+        max_size_bytes = max_size_mb * 1024 * 1024
+
+        if uploaded_file.size > max_size_bytes:
+            return Response(
+                {
+                    "file": (
+                        f"File exceeds the maximum upload size "
+                        f"of {max_size_mb} MB."
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if os.path.splitext(uploaded_file.name)[1].lower() != ".pdf":
+            return Response(
+                {"file": "Only PDF files are supported."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        document = serializer.save(
+            company=company,
+            uploaded_by=user,
+            original_filename=os.path.basename(uploaded_file.name),
+        )
+
+        return Response(
+            self.get_serializer(document).data,
+            status=status.HTTP_201_CREATED,
+        )

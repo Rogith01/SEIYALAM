@@ -1,0 +1,889 @@
+﻿===== KNOWLEDGE MODELS =====
+
+import os
+import uuid
+
+from django.conf import settings
+from django.core.exceptions import ValidationError
+from django.db import models
+
+
+def company_document_upload_path(instance, filename):
+    """
+    Store each company's documents in a separate directory.
+    Use a generated filename rather than trusting the uploaded name.
+    """
+    extension = os.path.splitext(filename)[1].lower()
+    return (
+        f"knowledge_base/company_{instance.company_id}/"
+        f"{uuid.uuid4().hex}{extension}"
+    )
+
+
+class CompanyDocument(models.Model):
+
+    class Status(models.TextChoices):
+        UPLOADED = "UPLOADED", "Uploaded"
+        PROCESSING = "PROCESSING", "Processing"
+        READY = "READY", "Ready"
+        FAILED = "FAILED", "Failed"
+
+    company = models.ForeignKey(
+        "companies.Company",
+        on_delete=models.CASCADE,
+        related_name="knowledge_documents",
+    )
+
+    uploaded_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name="uploaded_knowledge_documents",
+    )
+
+    title = models.CharField(max_length=200)
+
+    description = models.TextField(blank=True)
+
+    file = models.FileField(
+        upload_to=company_document_upload_path,
+        max_length=500,
+    )
+
+    original_filename = models.CharField(max_length=255)
+
+    status = models.CharField(
+        max_length=20,
+        choices=Status.choices,
+        default=Status.UPLOADED,
+    )
+
+    extracted_text = models.TextField(blank=True)
+
+    processing_error = models.TextField(blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(
+                fields=["company", "status"],
+                name="kb_company_status_idx",
+            ),
+        ]
+
+    def clean(self):
+        super().clean()
+
+        if self.uploaded_by_id and self.company_id:
+            uploader = self.uploaded_by
+
+            if uploader.role not in ("FOUNDER", "ADMIN"):
+                raise ValidationError({
+                    "uploaded_by": (
+                        "Only authorized company administrators "
+                        "can upload knowledge documents."
+                    )
+                })
+
+            if (
+                uploader.role == "ADMIN"
+                and uploader.company_id != self.company_id
+            ):
+                raise ValidationError({
+                    "company": (
+                        "An administrator can only upload documents "
+                        "for their own company."
+                    )
+                })
+
+        if self.file and self.file.name:
+            extension = os.path.splitext(self.file.name)[1].lower()
+
+            if extension != ".pdf":
+                raise ValidationError({
+                    "file": "Only PDF documents are supported initially."
+                })
+
+    def __str__(self):
+        return f"{self.title} (Company {self.company_id})"
+
+class DocumentChunk(models.Model):
+    """
+    A searchable text passage extracted from a company document.
+    Each chunk belongs to one document and one company.
+    """
+
+    company = models.ForeignKey(
+        "companies.Company",
+        on_delete=models.CASCADE,
+        related_name="knowledge_chunks",
+    )
+
+    document = models.ForeignKey(
+        CompanyDocument,
+        on_delete=models.CASCADE,
+        related_name="chunks",
+    )
+
+    chunk_index = models.PositiveIntegerField()
+
+    text = models.TextField()
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["document_id", "chunk_index"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["document", "chunk_index"],
+                name="kb_unique_document_chunk",
+            ),
+        ]
+        indexes = [
+            models.Index(
+                fields=["company", "document"],
+                name="kb_chunk_company_doc_idx",
+            ),
+        ]
+
+    def clean(self):
+        super().clean()
+
+        if (
+            self.document_id
+            and self.company_id != self.document.company_id
+        ):
+            from django.core.exceptions import ValidationError
+
+            raise ValidationError({
+                "company": (
+                    "The chunk's company must match its document's company."
+                )
+            })
+
+    def __str__(self):
+        return (
+            f"Chunk {self.chunk_index} "
+            f"of document {self.document_id}"
+        )
+
+===== KNOWLEDGE VIEWS =====
+
+import os
+
+from django.db import transaction
+from pypdf import PdfReader
+from rest_framework import generics, status
+from rest_framework.parsers import FormParser, MultiPartParser
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+
+from companies.models import Company, PlatformSettings
+
+from .chunking import split_text_into_chunks
+from .models import CompanyDocument, DocumentChunk
+from .permissions import IsCompanyKnowledgeAdmin
+from .serializers import CompanyDocumentSerializer
+from .retrieval import retrieve_relevant_chunks
+from .semantic_retrieval import retrieve_semantic_chunks
+
+class CompanyDocumentListCreateView(generics.ListCreateAPIView):
+    """
+    GET  /api/knowledge/documents/ - list accessible documents
+    POST /api/knowledge/documents/ - upload and process a PDF
+    """
+
+    serializer_class = CompanyDocumentSerializer
+    permission_classes = [IsAuthenticated, IsCompanyKnowledgeAdmin]
+    parser_classes = [MultiPartParser, FormParser]
+
+    def get_queryset(self):
+        user = self.request.user
+
+        if user.role == "ADMIN":
+            if not user.company_id:
+                return CompanyDocument.objects.none()
+
+            return CompanyDocument.objects.filter(
+                company_id=user.company_id
+            ).select_related("company", "uploaded_by")
+
+        if user.role == "FOUNDER":
+            company_id = self.request.query_params.get("company_id")
+
+            if not company_id or not company_id.isdigit():
+                return CompanyDocument.objects.none()
+
+            return CompanyDocument.objects.filter(
+                company_id=int(company_id)
+            ).select_related("company", "uploaded_by")
+
+        return CompanyDocument.objects.none()
+
+    def create(self, request, *args, **kwargs):
+        user = request.user
+
+        if user.role == "ADMIN":
+            if not user.company_id:
+                return Response(
+                    {"detail": "Your account is not linked to a company."},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+
+            company = user.company
+
+        elif user.role == "FOUNDER":
+            company_id = request.data.get("company_id")
+
+            if not company_id:
+                return Response(
+                    {"company_id": "This field is required for a founder."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            try:
+                company = Company.objects.get(pk=int(company_id))
+            except (Company.DoesNotExist, TypeError, ValueError):
+                return Response(
+                    {"company_id": "Select a valid company."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+        else:
+            return Response(
+                {"detail": "You cannot upload company documents."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        uploaded_file = request.FILES.get("file")
+
+        if uploaded_file is None:
+            return Response(
+                {"file": "Please attach a PDF file."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            max_size_mb = (
+                PlatformSettings.get_settings().max_upload_size_mb
+            )
+        except Exception:
+            max_size_mb = 10
+
+        if uploaded_file.size > max_size_mb * 1024 * 1024:
+            return Response(
+                {
+                    "file": (
+                        "File exceeds the maximum upload size "
+                        f"of {max_size_mb} MB."
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if os.path.splitext(uploaded_file.name)[1].lower() != ".pdf":
+            return Response(
+                {"file": "Only PDF files are supported."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        document = serializer.save(
+            company=company,
+            uploaded_by=user,
+            original_filename=os.path.basename(uploaded_file.name),
+            status=CompanyDocument.Status.PROCESSING,
+        )
+
+        try:
+            document.file.open("rb")
+
+            try:
+                reader = PdfReader(document.file)
+
+                if reader.is_encrypted:
+                    raise ValueError(
+                        "Password-protected PDFs are not supported."
+                    )
+
+                extracted_text = "\n".join(
+                    page.extract_text() or ""
+                    for page in reader.pages
+                ).strip()
+
+            finally:
+                document.file.close()
+
+            if not extracted_text:
+                document.status = CompanyDocument.Status.FAILED
+                document.processing_error = (
+                    "No extractable text found. The PDF may be scanned "
+                    "or contain only images; OCR is not implemented yet."
+                )
+            else:
+                chunks = split_text_into_chunks(extracted_text)
+
+                # Save the extracted text and its chunks together.
+                with transaction.atomic():
+                    document.extracted_text = extracted_text
+                    document.status = CompanyDocument.Status.READY
+                    document.processing_error = ""
+
+                    document.save(
+                        update_fields=[
+                            "extracted_text",
+                            "status",
+                            "processing_error",
+                            "updated_at",
+                        ]
+                    )
+
+                    # Replace existing chunks if the document is
+                    # processed again.
+                    DocumentChunk.objects.filter(
+                        document=document
+                    ).delete()
+
+                    DocumentChunk.objects.bulk_create(
+                        [
+                            DocumentChunk(
+                                company_id=document.company_id,
+                                document=document,
+                                chunk_index=index,
+                                text=chunk,
+                            )
+                            for index, chunk in enumerate(chunks)
+                        ]
+                    )
+
+                return Response(
+                    self.get_serializer(document).data,
+                    status=status.HTTP_201_CREATED,
+                )
+
+        except Exception:
+            document.status = CompanyDocument.Status.FAILED
+            document.processing_error = (
+                "Could not process this PDF. Check that it is a valid, "
+                "readable PDF file."
+            )
+
+        document.save(
+            update_fields=[
+                "extracted_text",
+                "status",
+                "processing_error",
+                "updated_at",
+            ]
+        )
+
+        return Response(
+            self.get_serializer(document).data,
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class CompanyDocumentSearchView(generics.GenericAPIView):
+    """
+    GET /api/knowledge/search/?q=keyword
+
+    Admins can search only their own company's documents.
+    Founders must provide a valid company_id.
+    """
+
+    serializer_class = CompanyDocumentSerializer
+    permission_classes = [IsAuthenticated, IsCompanyKnowledgeAdmin]
+
+    def get(self, request, *args, **kwargs):
+        query = request.query_params.get("q", "").strip()
+
+        if len(query) < 2:
+            return Response(
+                {
+                    "detail": (
+                        "Enter a search term with at least 2 characters."
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        user = request.user
+
+        if user.role == "ADMIN":
+            if not user.company_id:
+                return Response(
+                    {
+                        "detail": (
+                            "Your account is not linked to a company."
+                        )
+                    },
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+
+            requested_company_id = request.query_params.get("company_id")
+
+            if requested_company_id:
+                if not requested_company_id.isdigit():
+                    return Response(
+                        {"company_id": "A valid company_id is required."},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+
+                if int(requested_company_id) != user.company_id:
+                    return Response(
+                        {
+                            "detail": (
+                                "You cannot access another company's "
+                                "documents."
+                            )
+                        },
+                        status=status.HTTP_403_FORBIDDEN,
+                    )
+
+            company_id = user.company_id
+
+        elif user.role == "FOUNDER":
+            company_id = request.query_params.get("company_id")
+
+            if not company_id or not company_id.isdigit():
+                return Response(
+                    {"company_id": "A valid company_id is required."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            company_id = int(company_id)
+
+            if not Company.objects.filter(pk=company_id).exists():
+                return Response(
+                    {"company_id": "Select a valid company."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+        else:
+            return Response(
+                {"detail": "You cannot search company documents."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        documents = CompanyDocument.objects.filter(
+            company_id=company_id,
+            status=CompanyDocument.Status.READY,
+            extracted_text__icontains=query,
+        ).select_related("company")
+
+        results = []
+
+        for document in documents[:20]:
+            text = document.extracted_text
+            position = text.lower().find(query.lower())
+
+            start = max(0, position - 100)
+            end = min(len(text), position + len(query) + 200)
+
+            results.append(
+                {
+                    "id": document.id,
+                    "title": document.title,
+                    "company": document.company_id,
+                    "company_name": document.company.name,
+                    "matching_text": text[start:end],
+                }
+            )
+
+        return Response(
+            {
+                "query": query,
+                "count": len(results),
+                "results": results,
+            }
+        )
+
+class KnowledgeRetrieveView(generics.GenericAPIView):
+    """
+    POST /api/knowledge/retrieve/
+
+    Retrieve relevant text chunks for an authenticated user.
+    Admins are restricted to their own company.
+    Founders must supply company_id.
+    """
+
+    permission_classes = [IsAuthenticated, IsCompanyKnowledgeAdmin]
+
+    def post(self, request, *args, **kwargs):
+        query = str(request.data.get("query", "")).strip()
+
+        if len(query) < 2:
+            return Response(
+                {"query": "Enter a question with at least 2 characters."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        user = request.user
+
+        if user.role == "ADMIN":
+            if not user.company_id:
+                return Response(
+                    {"detail": "Your account is not linked to a company."},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+
+            company_id = user.company_id
+
+            requested_company_id = request.data.get("company_id")
+            if requested_company_id not in (None, ""):
+                try:
+                    requested_company_id = int(requested_company_id)
+                except (TypeError, ValueError):
+                    return Response(
+                        {"company_id": "A valid company_id is required."},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+
+                if requested_company_id != company_id:
+                    return Response(
+                        {"detail": "You cannot access another company's documents."},
+                        status=status.HTTP_403_FORBIDDEN,
+                    )
+
+        elif user.role == "FOUNDER":
+            try:
+                company_id = int(request.data.get("company_id"))
+            except (TypeError, ValueError):
+                return Response(
+                    {"company_id": "A valid company_id is required."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            if not Company.objects.filter(pk=company_id).exists():
+                return Response(
+                    {"company_id": "Select a valid company."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+        else:
+            return Response(
+                {"detail": "You cannot retrieve company knowledge."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        
+        retrieval_mode = str(
+            request.data.get("retrieval_mode", "keyword")
+        ).strip().lower()
+
+        if retrieval_mode == "keyword":
+            results = retrieve_relevant_chunks(query, company_id)
+
+        elif retrieval_mode == "semantic":
+            results = retrieve_semantic_chunks(query, company_id)
+
+        else:
+            return Response(
+                {
+                    "retrieval_mode": (
+                        "Choose either 'keyword' or 'semantic'."
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+
+        return Response(
+            {
+                "query": query,
+                "company_id": company_id,
+                "count": len(results),
+                "results": results,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+===== KNOWLEDGE URLS =====
+
+from django.urls import path
+
+from .views import (
+    CompanyDocumentListCreateView,
+    CompanyDocumentSearchView,
+    KnowledgeRetrieveView,
+)
+
+urlpatterns = [
+    path(
+        "documents/",
+        CompanyDocumentListCreateView.as_view(),
+        name="knowledge-document-list-create",
+    ),
+    path(
+        "search/",
+        CompanyDocumentSearchView.as_view(),
+        name="knowledge-document-search",
+    ),
+    path(
+        "retrieve/",
+        KnowledgeRetrieveView.as_view(),
+        name="knowledge-retrieve",
+    ),
+]
+
+===== USER MODEL LOCATION =====
+
+--- C:\Users\akrog\OneDrive\Desktop\SEIYALAM\accounts\models.py ---
+
+from django.contrib.auth.models import AbstractUser
+from django.db import models
+
+
+class User(AbstractUser):
+
+    class Role(models.TextChoices):
+        FOUNDER = "FOUNDER", "Founder"
+        ADMIN = "ADMIN", "Admin"
+        WORKER = "WORKER", "Worker"
+        CUSTOMER = "CUSTOMER", "Customer"
+
+    class Availability(models.TextChoices):
+        AVAILABLE = "AVAILABLE", "Available"
+        BUSY = "BUSY", "Busy"
+        OFFLINE = "OFFLINE", "Offline"
+
+    role = models.CharField(
+        max_length=20,
+        choices=Role.choices,
+        default=Role.CUSTOMER,
+    )
+
+    # Display name.
+    #
+    # For customers, this will be their real/display name.
+    # It will be shown to Admin/Worker instead of username
+    # when viewing customer-related information.
+    name = models.CharField(
+        max_length=150,
+        blank=True,
+    )
+
+    # Used for Admin and Worker.
+    # Customers and Founder do not need a permanent company.
+    company = models.ForeignKey(
+        "companies.Company",
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="users",
+    )
+
+    # Phone number.
+    #
+    # Phone numbers are unique within two separate groups:
+    #
+    # FOUNDER + ADMIN + WORKER
+    # -> one shared STAFF phone pool
+    #
+    # CUSTOMER
+    # -> separate CUSTOMER phone pool
+    #
+    # Therefore the same phone can exist once in STAFF
+    # and once in CUSTOMER.
+    phone = models.CharField(
+        max_length=20,
+        null=True,
+        blank=True,
+    )
+
+    # Phone-number pool.
+    #
+    # Founder/Admin/Worker -> STAFF
+    # Customer             -> CUSTOMER
+    #
+    # Normal database column instead of GeneratedField
+    # because TiDB does not support the required generated
+    # stored column ALTER TABLE operation.
+    phone_group = models.CharField(
+        max_length=8,
+        default="CUSTOMER",
+        editable=False,
+    )
+
+    # True only after the phone number has been verified by OTP.
+    phone_verified = models.BooleanField(
+        default=False,
+    )
+
+    address = models.TextField(
+        blank=True,
+    )
+
+    employee_id = models.CharField(
+        max_length=50,
+        blank=True,
+    )
+
+    joining_date = models.DateField(
+        null=True,
+        blank=True,
+    )
+
+    availability = models.CharField(
+        max_length=20,
+        choices=Availability.choices,
+        default=Availability.OFFLINE,
+    )
+
+    skills = models.ManyToManyField(
+        "Skill",
+        blank=True,
+        related_name="workers",
+    )
+
+    def save(self, *args, **kwargs):
+        """
+        Automatically keep phone_group synchronized with the user's role.
+
+        FOUNDER / ADMIN / WORKER -> STAFF
+        CUSTOMER                 -> CUSTOMER
+        """
+
+        if self.role in [
+            self.Role.FOUNDER,
+            self.Role.ADMIN,
+            self.Role.WORKER,
+        ]:
+            self.phone_group = "STAFF"
+        else:
+            self.phone_group = "CUSTOMER"
+
+        super().save(*args, **kwargs)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["phone_group", "phone"],
+                name="unique_phone_within_role_group",
+            ),
+        ]
+
+
+class Skill(models.Model):
+
+    name = models.CharField(
+        max_length=100,
+        unique=True,
+    )
+
+    description = models.TextField(
+        blank=True,
+    )
+
+    created_at = models.DateTimeField(
+        auto_now_add=True,
+    )
+
+    def __str__(self):
+        return self.name
+
+
+class CustomerCompany(models.Model):
+
+    customer = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name="customer_companies",
+    )
+
+    company = models.ForeignKey(
+        "companies.Company",
+        on_delete=models.CASCADE,
+        related_name="customers",
+    )
+
+    connected_at = models.DateTimeField(
+        auto_now_add=True,
+    )
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["customer", "company"],
+                name="unique_customer_company",
+            )
+        ]
+
+    def __str__(self):
+        return (
+            f"{self.customer.username} - "
+            f"{self.company.name}"
+        )
+
+
+# ============================================================
+# PHONE OTP
+# ============================================================
+
+
+class PhoneOTP(models.Model):
+
+    class Purpose(models.TextChoices):
+        PHONE_VERIFICATION = (
+            "PHONE_VERIFICATION",
+            "Phone Verification",
+        )
+
+        PASSWORD_RESET = (
+            "PASSWORD_RESET",
+            "Password Reset",
+        )
+
+        PHONE_CHANGE = (
+            "PHONE_CHANGE",
+            "Phone Change",
+        )
+
+    user = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name="phone_otps",
+    )
+
+    phone = models.CharField(
+        max_length=20,
+    )
+
+    # We store the hashed OTP, not the actual OTP.
+    code_hash = models.CharField(
+        max_length=128,
+    )
+
+    purpose = models.CharField(
+        max_length=30,
+        choices=Purpose.choices,
+    )
+
+    expires_at = models.DateTimeField()
+
+    attempts = models.PositiveIntegerField(
+        default=0,
+    )
+
+    is_used = models.BooleanField(
+        default=False,
+    )
+
+    created_at = models.DateTimeField(
+        auto_now_add=True,
+    )
+
+    def __str__(self):
+        return (
+            f"{self.user.username} - "
+            f"{self.phone} - "
+            f"{self.purpose}"
+        )
+
+===== ENVIRONMENT CONFIGURATION NAMES =====
+requirements.txt

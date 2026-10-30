@@ -9,6 +9,8 @@ import {
   Minimize2,
   UserRound,
   LoaderCircle,
+  FileText,
+  Download,
 } from "lucide-react";
 import api from "../services/api";
 
@@ -27,6 +29,69 @@ function getErrorMessage(error) {
   }
 
   return "I couldn't process that message. Please try again.";
+}
+
+
+function getRequestedExport(text) {
+  const value = String(text || "").toLowerCase();
+  const requestsFile = /\b(download|export|generate|create)\b/.test(value);
+  if (!requestsFile) return null;
+  if (/\b(pdf)\b/.test(value)) return "export_pdf";
+  if (/\b(csv)\b/.test(value)) return "export_csv";
+  return null;
+}
+
+function filenameFromResponse(response, action) {
+  const disposition = response?.headers?.["content-disposition"] || "";
+  const match = disposition.match(/filename\*?=(?:UTF-8''|")?([^";]+)/i);
+  if (match?.[1]) {
+    try {
+      return decodeURIComponent(match[1].replace(/^"|"$/g, ""));
+    } catch {
+      return match[1].replace(/^"|"$/g, "");
+    }
+  }
+  return action === "export_csv"
+    ? "seiyalam-business-report.csv"
+    : "seiyalam-business-report.pdf";
+}
+
+async function exportReport(action, conversationId, questionText) {
+  const response = await api.post(
+    "/knowledge/chat/",
+    {
+      action,
+      question: questionText,
+      ...(conversationId ? { conversation_id: conversationId } : {}),
+    },
+    { responseType: "blob" }
+  );
+
+  const contentType = response.headers?.["content-type"] || "";
+  if (contentType.includes("application/json")) {
+    const text = await response.data.text();
+    let message = "The report could not be generated.";
+    try {
+      const data = JSON.parse(text);
+      message = data.detail || data.error || message;
+    } catch {
+      // Keep the fallback message when the server returns invalid JSON.
+    }
+    throw new Error(message);
+  }
+
+  const blob = response.data instanceof Blob
+    ? response.data
+    : new Blob([response.data], {
+        type: action === "export_csv" ? "text/csv" : "application/pdf",
+      });
+
+  return {
+    url: URL.createObjectURL(blob),
+    filename: filenameFromResponse(response, action),
+    fileType: action === "export_csv" ? "CSV" : "PDF",
+    size: blob.size,
+  };
 }
 
 export default function AIAssistantWidget() {
@@ -78,8 +143,20 @@ export default function AIAssistantWidget() {
 
       const response = await api.post("/knowledge/chat/", payload);
       const result = response.data;
+      const nextConversationId = result.conversation_id || conversationId;
+      setConversationId(nextConversationId);
 
-      setConversationId(result.conversation_id);
+      const exportAction = getRequestedExport(text);
+      let attachment = null;
+      let exportError = "";
+
+      if (exportAction) {
+        try {
+          attachment = await exportReport(exportAction, nextConversationId, text);
+        } catch (exportErr) {
+          exportError = exportErr?.message || "The report was generated, but the download file could not be created.";
+        }
+      }
 
       setMessages((current) => [
         ...current,
@@ -88,6 +165,8 @@ export default function AIAssistantWidget() {
           role: "assistant",
           content: result.answer || "I couldn't generate an answer.",
           sources: result.sources || [],
+          attachment,
+          exportError,
         },
       ]);
     } catch (err) {
@@ -236,6 +315,39 @@ export default function AIAssistantWidget() {
                     <p className="whitespace-pre-wrap break-words">
                       {message.content}
                     </p>
+
+                    {!isUser && message.attachment && (
+                      <div className="mt-3 flex items-center gap-2 rounded-xl border border-indigo-200 bg-indigo-50 p-3">
+                        <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-white text-indigo-600">
+                          <FileText size={18} />
+                        </div>
+                        <div className="min-w-0 flex-1">
+                          <p className="truncate text-xs font-semibold text-slate-800">
+                            {message.attachment.filename}
+                          </p>
+                          <p className="text-[11px] text-slate-500">
+                            {message.attachment.fileType} report
+                            {message.attachment.size
+                              ? ` · ${(message.attachment.size / 1024).toFixed(1)} KB`
+                              : ""}
+                          </p>
+                        </div>
+                        <a
+                          href={message.attachment.url}
+                          download={message.attachment.filename}
+                          className="inline-flex shrink-0 items-center gap-1.5 rounded-lg bg-indigo-600 px-2.5 py-2 text-xs font-semibold text-white transition hover:bg-indigo-700"
+                        >
+                          <Download size={14} />
+                          Download
+                        </a>
+                      </div>
+                    )}
+
+                    {!isUser && message.exportError && (
+                      <p className="mt-2 text-xs text-red-600">
+                        Download unavailable: {message.exportError}
+                      </p>
+                    )}
 
                     {!isUser && message.sources?.length > 0 && (
                       <div className="mt-3 border-t border-slate-100 pt-2">
