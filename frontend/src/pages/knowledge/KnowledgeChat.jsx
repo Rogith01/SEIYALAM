@@ -77,13 +77,12 @@ const downloadReport = async (postChat, action, reportQuestion = "") => {
       : "seiyalam-business-report.pdf");
 
   const url = window.URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = filename;
-  document.body.appendChild(link);
-  link.click();
-  link.remove();
-  window.setTimeout(() => window.URL.revokeObjectURL(url), 1000);
+  return {
+    url,
+    filename,
+    fileType: action === "export_csv" ? "CSV" : "PDF",
+    size: blob.size,
+  };
 };
 
 const formatDate = (value) => {
@@ -321,7 +320,7 @@ export default function KnowledgeChat() {
 
       if (asksForExport && (wantsCsv || wantsPdf)) {
         const action = wantsCsv ? "export_csv" : "export_pdf";
-        await downloadReport(postChat, action, text);
+        const file = await downloadReport(postChat, action, text);
 
         setMessages((current) => [
           ...current.filter((item) => item.id !== optimisticMessage.id),
@@ -329,7 +328,8 @@ export default function KnowledgeChat() {
           {
             id: `answer-${Date.now()}`,
             role: "assistant",
-            content: `Your ${wantsCsv ? "CSV" : "PDF"} business report has been downloaded.`,
+            content: "Your business report is ready to download.",
+            attachment: file,
             sources: [],
             created_at: new Date().toISOString(),
           },
@@ -658,6 +658,31 @@ export default function KnowledgeChat() {
                         <div className="whitespace-pre-wrap break-words">
                           {message.content}
                         </div>
+                        {!isUser && message.attachment && (
+                          <div className="mt-3 flex items-center gap-3 rounded-xl border border-indigo-200 bg-white p-3">
+                            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-indigo-50 text-indigo-600">
+                              <FileText size={20} />
+                            </div>
+                            <div className="min-w-0 flex-1">
+                              <p className="truncate text-sm font-semibold text-slate-800">
+                                {message.attachment.filename}
+                              </p>
+                              <p className="text-xs text-slate-500">
+                                {message.attachment.fileType} document
+                                {message.attachment.size
+                                  ? ` · ${(message.attachment.size / 1024).toFixed(1)} KB`
+                                  : ""}
+                              </p>
+                            </div>
+                            <a
+                              href={message.attachment.url}
+                              download={message.attachment.filename}
+                              className="shrink-0 rounded-lg bg-indigo-600 px-3 py-2 text-xs font-semibold text-white hover:bg-indigo-700"
+                            >
+                              Download {message.attachment.fileType}
+                            </a>
+                          </div>
+                        )}
                       </div>
 
                       {!isUser && message.used_ai === false && (
