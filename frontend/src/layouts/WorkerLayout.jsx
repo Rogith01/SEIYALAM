@@ -27,6 +27,7 @@ import {
 import { useAuth } from "../context/AuthContext";
 import api from "../services/api";
 import PlatformAnnouncement from "../components/PlatformAnnouncement";
+import AIAssistantWidget from "../components/AIAssistantWidget";
 
 
 function WorkerLayout({ children }) {
@@ -1412,6 +1413,9 @@ function WorkerLayout({ children }) {
   <PlatformAnnouncement />
 
   {children}
+
+  {/* Floating AI assistant available throughout the worker portal */}
+      <AIAssistantWidget />
 
 </main>
 
