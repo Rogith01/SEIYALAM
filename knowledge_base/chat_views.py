@@ -621,6 +621,184 @@ def _report_response(statistics, file_format):
     return response
 
 
+
+def _answer_worker_question(question, normalized, own_orders, user):
+    """Answer common worker questions from only that worker's live records."""
+    from django.db.models import Count, Q
+    from django.core.exceptions import FieldDoesNotExist
+
+    model = WorkOrder
+    fields = {field.name: field for field in model._meta.get_fields() if getattr(field, "concrete", False)}
+    count = own_orders.count()
+
+    def existing_field(*names):
+        return next((name for name in names if name in fields), None)
+
+    status_field = existing_field("status", "work_status", "state")
+    created_field = existing_field("created_at", "created", "date_created")
+    scheduled_field = existing_field("scheduled_at", "scheduled_date", "start_date", "due_date", "deadline")
+    number_field = existing_field("work_order_number", "number", "code")
+    notes_field = existing_field("notes", "description", "details")
+    title_field = existing_field("title", "subject", "name")
+
+    status_counts = {}
+    if status_field:
+        for value in own_orders.values_list(status_field, flat=True):
+            key = str(value or "Unknown")
+            status_counts[key] = status_counts.get(key, 0) + 1
+
+    # Counts and status questions.
+    if any(term in normalized for term in ("how many", "how much", "count", "number of", "total", "my workload", "my work load")):
+        if any(term in normalized for term in ("yesterday", "today", "tomorrow", "this week", "last week", "this month", "last month")):
+            period_text = normalized
+            target_field = scheduled_field or created_field
+            if not target_field:
+                return "I can count your assigned work orders, but this system does not expose a usable schedule or creation-date field for date-based filtering."
+            today = timezone.localdate()
+            start_date = end_date = None
+            if "yesterday" in period_text:
+                start_date = end_date = today - timedelta(days=1)
+            elif "tomorrow" in period_text:
+                start_date = end_date = today + timedelta(days=1)
+            elif "today" in period_text:
+                start_date = end_date = today
+            elif "last week" in period_text:
+                start_date = today - timedelta(days=today.weekday() + 7)
+                end_date = start_date + timedelta(days=6)
+            elif "this week" in period_text:
+                start_date = today - timedelta(days=today.weekday())
+                end_date = today
+            elif "last month" in period_text:
+                first_this = today.replace(day=1)
+                end_date = first_this - timedelta(days=1)
+                start_date = end_date.replace(day=1)
+            elif "this month" in period_text:
+                start_date, end_date = today.replace(day=1), today
+            if start_date and end_date:
+                filtered = own_orders.filter(**{
+                    f"{target_field}__date__gte": start_date,
+                    f"{target_field}__date__lte": end_date,
+                })
+                return f"You have {filtered.count()} of your work order(s) for {period_text}, using {target_field}."
+        requested_status = next((key for key in status_counts if key.lower() in normalized), None)
+        if requested_status:
+            return f"You have {status_counts[requested_status]} work order(s) with status {requested_status}."
+        breakdown = ", ".join(f"{key}: {value}" for key, value in sorted(status_counts.items()))
+        return f"You have {count} assigned work order(s)." + (f" Status breakdown: {breakdown}." if breakdown else "")
+
+    # A specific work-order ID or number.
+    identifier_match = re.search(r"(?:work\\s*order\\s*)?#?\\b(\\d{1,12})\\b", normalized)
+    if identifier_match and any(term in normalized for term in ("details", "detail", "status", "work order", "workorder", "job", "task", "show")):
+        identifier = identifier_match.group(1)
+        lookup = Q(pk=identifier)
+        if number_field:
+            lookup |= Q(**{number_field: identifier})
+        order = own_orders.filter(lookup).first()
+        if not order:
+            return f"I couldn't find work order {identifier} among your assigned work orders."
+        parts = []
+        if number_field:
+            parts.append(f"Work order: {getattr(order, number_field, '')}")
+        parts.append(f"ID: {order.pk}")
+        if status_field:
+            parts.append(f"Status: {getattr(order, status_field, '')}")
+        if title_field:
+            parts.append(f"Title: {getattr(order, title_field, '')}")
+        if scheduled_field:
+            parts.append(f"{scheduled_field.replace('_', ' ').title()}: {getattr(order, scheduled_field, '')}")
+        if notes_field:
+            parts.append(f"Details: {getattr(order, notes_field, '')}")
+        if created_field:
+            parts.append(f"Created: {getattr(order, created_field, '')}")
+        return "\\n".join(parts)
+
+    # Work list, including real model fields only.
+    if any(term in normalized for term in ("list", "show", "display", "which", "details", "what work", "my jobs", "my tasks", "assigned to me", "my assigned")):
+        if any(term in normalized for term in ("today", "yesterday", "tomorrow")):
+            target_field = scheduled_field or created_field
+            if target_field:
+                day = timezone.localdate()
+                if "yesterday" in normalized:
+                    day -= timedelta(days=1)
+                elif "tomorrow" in normalized:
+                    day += timedelta(days=1)
+                own_orders = own_orders.filter(**{f"{target_field}__date": day})
+        display_fields = [name for name in (number_field, "id", title_field, status_field, scheduled_field, created_field) if name and name in fields]
+        display_fields = list(dict.fromkeys(display_fields))
+        rows = list(own_orders.order_by("-pk").values(*display_fields)[:30]) if display_fields else []
+        if not rows:
+            return "No matching work orders were found in your assigned records."
+        lines = ["Your work orders:"]
+        for row in rows:
+            values = [f"{key.replace('_', ' ').title()}: {value}" for key, value in row.items() if value not in (None, "")]
+            lines.append("- " + "; ".join(values))
+        if own_orders.count() > len(rows):
+            lines.append(f"Showing {len(rows)} records. Ask for a specific work order number to see its details.")
+        return "\\n".join(lines)
+
+    # Customer questions: customer is commonly attached to the linked service request.
+    if "customer" in normalized:
+        sr_field = fields.get("service_request")
+        if sr_field and getattr(sr_field, "is_relation", False):
+            sr_model = sr_field.related_model
+            sr_names = {f.name for f in sr_model._meta.get_fields()}
+            customer_field = next((n for n in ("customer", "client") if n in sr_names), None)
+            if customer_field:
+                rel_path = f"service_request__{customer_field}"
+                if any(term in normalized for term in ("most", "highest", "maximum", "more work", "most work")):
+                    customer_counts = {}
+                    for order in own_orders.select_related("service_request", f"service_request__{customer_field}"):
+                        sr = getattr(order, "service_request", None)
+                        customer = getattr(sr, customer_field, None) if sr else None
+                        if customer:
+                            name = getattr(customer, "name", None) or getattr(customer, "username", None) or str(customer)
+                            customer_counts[name] = customer_counts.get(name, 0) + 1
+                    if not customer_counts:
+                        return "Customer names are not available on your assigned work-order records."
+                    highest = max(customer_counts.values())
+                    leaders = sorted(name for name, value in customer_counts.items() if value == highest)
+                    return f"{', '.join(leaders)} {'has' if len(leaders) == 1 else 'each have'} the most work orders assigned to you ({highest})."
+                customers = []
+                seen = set()
+                for order in own_orders.select_related("service_request", f"service_request__{customer_field}"):
+                    sr = getattr(order, "service_request", None)
+                    customer = getattr(sr, customer_field, None) if sr else None
+                    if customer:
+                        name = getattr(customer, "name", None) or getattr(customer, "username", None) or str(customer)
+                        if name not in seen:
+                            seen.add(name)
+                            customers.append(name)
+                return "Customers linked to your assigned work orders: " + (", ".join(customers) if customers else "none found in these records") + "."
+        return "I can't find a customer relationship on the available work-order fields, so I won't guess customer names."
+
+    # Work logs/evidence are not assumed to exist as WorkOrder fields.
+    if any(term in normalized for term in ("work log", "work logs", "evidence", "uploaded file", "uploaded files", "photo", "photos", "attachment", "attachments")):
+        return "I can answer this once the work-log or evidence records are connected to the worker chatbot. The current chat code only queries your WorkOrder records, so I won't invent upload or log details."
+
+    if any(term in normalized for term in ("admin", "manager", "supervisor", "who assigned")):
+        return "Your admin or manager's name is not available from the worker-chat query yet. I need to connect the actual company/admin relationship before I can answer accurately."
+
+    if any(term in normalized for term in ("help", "what can you", "what questions", "how can you")):
+        return (
+            "I can help with your own work orders. Try asking:\\n"
+            "- How many assigned work orders do I have?\\n"
+            "- Show my assigned work orders.\\n"
+            "- How many work orders did I have yesterday?\\n"
+            "- What work orders are scheduled today?\\n"
+            "- Show work order 150001.\\n"
+            "- Which customer has the most work orders assigned to me?\\n"
+            "- How many work orders are accepted or closed?"
+        )
+
+    # For general phrasing, provide useful live data rather than a generic fallback.
+    breakdown = ", ".join(f"{key}: {value}" for key, value in sorted(status_counts.items()))
+    return (
+        f"I found {count} work order(s) assigned to you."
+        + (f" Current status breakdown: {breakdown}." if breakdown else "")
+        + " You can ask about a status, a specific work order number, customers linked to your work, or work scheduled for a date."
+    )
+
+
 class KnowledgeChatSerializer(serializers.Serializer):
     question = serializers.CharField(
         min_length=2,
@@ -776,54 +954,40 @@ class KnowledgeChatView(generics.GenericAPIView):
 
         action = data.get("action", "chat")
 
-        # Workers use an isolated path: never allow company-wide reports,
-        # document retrieval, or admin business-intelligence functions.
+        # Workers use an isolated path: only their own work orders are queried.
+        # They cannot access company-wide documents, reports, or other workers' records.
         if user.role == "WORKER":
             if action != "chat":
                 return Response(
                     {"detail": "This action is available only to authorized administrators."},
                     status=status.HTTP_403_FORBIDDEN,
                 )
+
             question = data.get("question", "").strip()
-            # The app's work-order detail endpoint already compares worker_id
-            # with the authenticated user. Apply the same ownership boundary here.
+            normalized = _normalize_business_question(question)
             own_orders = WorkOrder.objects.filter(
                 worker=user,
                 company_id=company_id,
             ).select_related("service_request")
-            normalized = _normalize_business_question(question)
-            if any(term in normalized for term in ("all company", "other workers", "company report", "business report", "admin report", "customer list")):
-                answer = "I can help with your assigned work orders, but I can't provide company-wide reports or other people's information."
-            elif not _is_work_order_question(normalized) and not any(term in normalized for term in ("my work", "my assigned", "my tasks", "what is assigned to me", "my workload")):
-                answer = "I can help you check your assigned work orders. Try asking: 'Show my assigned work orders' or 'How many work orders are assigned to me?'"
-            else:
-                count = own_orders.count()
-                status_field = next(
-                    (field.name for field in WorkOrder._meta.get_fields()
-                     if getattr(field, "concrete", False) and field.name.lower() == "status"),
-                    None,
+
+            denied_terms = (
+                "all company", "other workers", "company report", "business report",
+                "admin report", "customer list", "all customers", "company wide",
+                "company-wide", "all work orders", "every worker",
+            )
+            if any(term in normalized for term in denied_terms):
+                answer = (
+                    "I can help with your own assigned work orders, but I can't provide "
+                    "company-wide reports or other people's private information."
                 )
-                status_counts = {}
-                if status_field:
-                    for row in own_orders.values_list(status_field, flat=True):
-                        key = str(row or "Unknown")
-                        status_counts[key] = status_counts.get(key, 0) + 1
-                if any(term in normalized for term in ("list", "show", "which", "what are", "details")):
-                    # Return only a minimal set of fields that actually exist on the model.
-                    candidate_fields = ("id", "title", "status", "description", "created_at")
-                    fields = [name for name in candidate_fields if any(
-                        getattr(field, "name", None) == name for field in WorkOrder._meta.get_fields()
-                    )]
-                    rows = list(own_orders.values(*fields)[:20]) if fields else []
-                    answer = "Your assigned work orders:\\n" + (
-                        "\\n".join(
-                            "- " + ", ".join(f"{key}: {value}" for key, value in row.items() if value not in (None, ""))
-                            for row in rows
-                        ) if rows else "No assigned work orders found."
-                    )
-                else:
-                    breakdown = ", ".join(f"{key}: {value}" for key, value in sorted(status_counts.items()))
-                    answer = f"You have {count} assigned work order(s)." + (f" Status breakdown: {breakdown}." if breakdown else "")
+            else:
+                answer = _answer_worker_question(
+                    question=question,
+                    normalized=normalized,
+                    own_orders=own_orders,
+                    user=user,
+                )
+
             return Response({
                 "answer": answer,
                 "used_ai": False,
