@@ -319,6 +319,22 @@ export default function KnowledgeChat() {
       const wantsPdf = /\bpdf\b/.test(normalizedText);
 
       if (asksForExport && (wantsCsv || wantsPdf)) {
+        // First fetch the full report text for the chat bubble.
+        const chatPayload = {
+          action: "chat",
+          question: text,
+          retrieval_mode: retrievalMode,
+        };
+
+        if (conversationId) {
+          chatPayload.conversation_id = conversationId;
+        }
+
+        const chatResponse = await postChat(chatPayload);
+        const result = chatResponse.data;
+        setConversationId(result.conversation_id);
+
+        // Then request the real file and show it beneath the report content.
         const action = wantsCsv ? "export_csv" : "export_pdf";
         const file = await downloadReport(postChat, action, text);
 
@@ -328,12 +344,15 @@ export default function KnowledgeChat() {
           {
             id: `answer-${Date.now()}`,
             role: "assistant",
-            content: "Your business report is ready to download.",
+            content: result.answer || "Your business report is ready.",
             attachment: file,
-            sources: [],
+            sources: result.sources || [],
+            used_ai: result.used_ai,
             created_at: new Date().toISOString(),
           },
         ]);
+
+        await loadConversations();
       } else {
         const payload = {
           action: "chat",
