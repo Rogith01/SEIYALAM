@@ -11,10 +11,11 @@ from django.utils import timezone
 from django.shortcuts import get_object_or_404
 
 from rest_framework import generics, serializers, status
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import BasePermission, IsAuthenticated
 from rest_framework.response import Response
 
 from companies.models import Company
+from work_orders.models import WorkOrder
 
 from .business_intelligence import get_business_statistics, get_period_business_statistics
 from .gemini_service import (
@@ -662,7 +663,26 @@ class KnowledgeChatSerializer(serializers.Serializer):
         return attrs
 
 
+class IsAdminFounderOrWorker(BasePermission):
+    """Allow authenticated company workers to reach the isolated chat path."""
+
+    message = "You do not have permission to access this information."
+
+    def has_permission(self, request, view):
+        user = request.user
+        if not user or not user.is_authenticated:
+            return False
+        if user.role == "ADMIN":
+            return user.company_id is not None
+        if user.role == "FOUNDER":
+            return True
+        if user.role == "WORKER":
+            return user.company_id is not None
+        return False
+
+
 class KnowledgeChatView(generics.GenericAPIView):
+    # Existing company-knowledge endpoint remains Admin/Founder only.
     permission_classes = [
         IsAuthenticated,
         IsCompanyKnowledgeAdmin,
@@ -707,6 +727,19 @@ class KnowledgeChatView(generics.GenericAPIView):
 
             return requested_company_id, None
 
+        if user.role == "WORKER":
+            if not user.company_id:
+                return None, Response(
+                    {"detail": "Your worker account is not linked to a company."},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+            if requested_company_id is not None and requested_company_id != user.company_id:
+                return None, Response(
+                    {"detail": "You cannot access another company's information."},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+            return user.company_id, None
+
         return None, Response(
             {"detail": "You cannot access company knowledge."},
             status=status.HTTP_403_FORBIDDEN,
@@ -742,6 +775,61 @@ class KnowledgeChatView(generics.GenericAPIView):
             return error_response
 
         action = data.get("action", "chat")
+
+        # Workers use an isolated path: never allow company-wide reports,
+        # document retrieval, or admin business-intelligence functions.
+        if user.role == "WORKER":
+            if action != "chat":
+                return Response(
+                    {"detail": "This action is available only to authorized administrators."},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+            question = data.get("question", "").strip()
+            # The app's work-order detail endpoint already compares worker_id
+            # with the authenticated user. Apply the same ownership boundary here.
+            own_orders = WorkOrder.objects.filter(
+                worker=user,
+                company_id=company_id,
+            ).select_related("service_request")
+            normalized = _normalize_business_question(question)
+            if any(term in normalized for term in ("all company", "other workers", "company report", "business report", "admin report", "customer list")):
+                answer = "I can help with your assigned work orders, but I can't provide company-wide reports or other people's information."
+            elif not _is_work_order_question(normalized) and not any(term in normalized for term in ("my work", "my assigned", "my tasks", "what is assigned to me", "my workload")):
+                answer = "I can help you check your assigned work orders. Try asking: 'Show my assigned work orders' or 'How many work orders are assigned to me?'"
+            else:
+                count = own_orders.count()
+                status_field = next(
+                    (field.name for field in WorkOrder._meta.get_fields()
+                     if getattr(field, "concrete", False) and field.name.lower() == "status"),
+                    None,
+                )
+                status_counts = {}
+                if status_field:
+                    for row in own_orders.values_list(status_field, flat=True):
+                        key = str(row or "Unknown")
+                        status_counts[key] = status_counts.get(key, 0) + 1
+                if any(term in normalized for term in ("list", "show", "which", "what are", "details")):
+                    # Return only a minimal set of fields that actually exist on the model.
+                    candidate_fields = ("id", "title", "status", "description", "created_at")
+                    fields = [name for name in candidate_fields if any(
+                        getattr(field, "name", None) == name for field in WorkOrder._meta.get_fields()
+                    )]
+                    rows = list(own_orders.values(*fields)[:20]) if fields else []
+                    answer = "Your assigned work orders:\\n" + (
+                        "\\n".join(
+                            "- " + ", ".join(f"{key}: {value}" for key, value in row.items() if value not in (None, ""))
+                            for row in rows
+                        ) if rows else "No assigned work orders found."
+                    )
+                else:
+                    breakdown = ", ".join(f"{key}: {value}" for key, value in sorted(status_counts.items()))
+                    answer = f"You have {count} assigned work order(s)." + (f" Status breakdown: {breakdown}." if breakdown else "")
+            return Response({
+                "answer": answer,
+                "used_ai": False,
+                "sources": [{"name": "Your Assigned Work Orders", "title": "Your Assigned Work Orders"}],
+                "company_id": company_id,
+            }, status=status.HTTP_200_OK)
 
         # Generate downloadable reports before normal chat handling.
         # Company access has already been checked by _get_company_id().
@@ -1032,3 +1120,28 @@ class KnowledgeChatView(generics.GenericAPIView):
             },
             status=status.HTTP_200_OK,
         )
+
+
+
+class IsWorkerOnly(BasePermission):
+    """Allow only authenticated workers linked to a company."""
+
+    message = "This endpoint is available only to company workers."
+
+    def has_permission(self, request, view):
+        user = request.user
+        return bool(
+            user
+            and user.is_authenticated
+            and getattr(user, "role", None) == "WORKER"
+            and getattr(user, "company_id", None) is not None
+        )
+
+
+class WorkerKnowledgeChatView(KnowledgeChatView):
+    """Worker-safe chat endpoint; inherited post() uses the worker-only branch."""
+
+    permission_classes = [
+        IsAuthenticated,
+        IsWorkerOnly,
+    ]

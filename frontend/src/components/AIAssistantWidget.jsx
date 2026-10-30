@@ -6,13 +6,14 @@ import {
   Send,
   Sparkles,
   X,
-  Minimize2,
   UserRound,
   LoaderCircle,
   FileText,
   Download,
 } from "lucide-react";
+
 import api from "../services/api";
+import { useAuth } from "../context/AuthContext";
 
 function getErrorMessage(error) {
   const data = error?.response?.data;
@@ -28,29 +29,41 @@ function getErrorMessage(error) {
     return "You don't have permission to access this information.";
   }
 
-  return "I couldn't process that message. Please try again.";
+  return (
+    error?.message ||
+    "I couldn't process that message. Please try again."
+  );
 }
-
 
 function getRequestedExport(text) {
   const value = String(text || "").toLowerCase();
   const requestsFile = /\b(download|export|generate|create)\b/.test(value);
+
   if (!requestsFile) return null;
   if (/\b(pdf)\b/.test(value)) return "export_pdf";
   if (/\b(csv)\b/.test(value)) return "export_csv";
+
   return null;
 }
 
 function filenameFromResponse(response, action) {
-  const disposition = response?.headers?.["content-disposition"] || "";
-  const match = disposition.match(/filename\*?=(?:UTF-8''|")?([^";]+)/i);
+  const disposition =
+    response?.headers?.["content-disposition"] || "";
+
+  const match = disposition.match(
+    /filename\*?=(?:UTF-8''|")?([^";]+)/
+  );
+
   if (match?.[1]) {
     try {
-      return decodeURIComponent(match[1].replace(/^"|"$/g, ""));
+      return decodeURIComponent(
+        match[1].replace(/^"|"$/g, "")
+      );
     } catch {
       return match[1].replace(/^"|"$/g, "");
     }
   }
+
   return action === "export_csv"
     ? "seiyalam-business-report.csv"
     : "seiyalam-business-report.pdf";
@@ -62,29 +75,40 @@ async function exportReport(action, conversationId, questionText) {
     {
       action,
       question: questionText,
-      ...(conversationId ? { conversation_id: conversationId } : {}),
+      ...(conversationId
+        ? { conversation_id: conversationId }
+        : {}),
     },
     { responseType: "blob" }
   );
 
-  const contentType = response.headers?.["content-type"] || "";
+  const contentType =
+    response.headers?.["content-type"] || "";
+
   if (contentType.includes("application/json")) {
-    const text = await response.data.text();
+    const responseText = await response.data.text();
+
     let message = "The report could not be generated.";
+
     try {
-      const data = JSON.parse(text);
+      const data = JSON.parse(responseText);
       message = data.detail || data.error || message;
     } catch {
-      // Keep the fallback message when the server returns invalid JSON.
+      // Use the fallback message.
     }
+
     throw new Error(message);
   }
 
-  const blob = response.data instanceof Blob
-    ? response.data
-    : new Blob([response.data], {
-        type: action === "export_csv" ? "text/csv" : "application/pdf",
-      });
+  const blob =
+    response.data instanceof Blob
+      ? response.data
+      : new Blob([response.data], {
+          type:
+            action === "export_csv"
+              ? "text/csv"
+              : "application/pdf",
+        });
 
   return {
     url: URL.createObjectURL(blob),
@@ -95,6 +119,17 @@ async function exportReport(action, conversationId, questionText) {
 }
 
 export default function AIAssistantWidget() {
+  const { user } = useAuth();
+
+  const role = String(user?.role || "").toUpperCase();
+  const isWorker = role === "WORKER";
+
+  // Workers use the restricted worker-chat endpoint.
+  // Admins and Founders retain the existing endpoint.
+  const chatEndpoint = isWorker
+    ? "/knowledge/worker-chat/"
+    : "/knowledge/chat/";
+
   const [open, setOpen] = useState(false);
   const [question, setQuestion] = useState("");
   const [messages, setMessages] = useState([]);
@@ -108,9 +143,29 @@ export default function AIAssistantWidget() {
   useEffect(() => {
     if (open) {
       inputRef.current?.focus();
-      bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+      bottomRef.current?.scrollIntoView({
+        behavior: "smooth",
+      });
     }
   }, [open, messages, sending]);
+
+  // Prevent chat state from leaking across role/account changes.
+  useEffect(() => {
+    setMessages([]);
+    setConversationId(null);
+    setQuestion("");
+    setError("");
+  }, [role]);
+
+  useEffect(() => {
+    return () => {
+      messages.forEach((message) => {
+        if (message.attachment?.url) {
+          URL.revokeObjectURL(message.attachment.url);
+        }
+      });
+    };
+  }, [messages]);
 
   const sendMessage = async (event) => {
     event?.preventDefault();
@@ -125,7 +180,11 @@ export default function AIAssistantWidget() {
       content: text,
     };
 
-    setMessages((current) => [...current, userMessage]);
+    setMessages((current) => [
+      ...current,
+      userMessage,
+    ]);
+
     setQuestion("");
     setSending(true);
     setError("");
@@ -134,27 +193,52 @@ export default function AIAssistantWidget() {
       const payload = {
         action: "chat",
         question: text,
-        retrieval_mode: "keyword",
       };
 
-      if (conversationId) {
-        payload.conversation_id = conversationId;
+      // Only Admin/Founder use the original retrieval settings
+      // and company-wide conversation identifiers.
+      if (!isWorker) {
+        payload.retrieval_mode = "keyword";
+
+        if (conversationId) {
+          payload.conversation_id = conversationId;
+        }
       }
 
-      const response = await api.post("/knowledge/chat/", payload);
-      const result = response.data;
-      const nextConversationId = result.conversation_id || conversationId;
-      setConversationId(nextConversationId);
+      const response = await api.post(
+        chatEndpoint,
+        payload
+      );
 
-      const exportAction = getRequestedExport(text);
+      const result = response.data;
+
+      const nextConversationId = isWorker
+        ? null
+        : result.conversation_id || conversationId;
+
+      if (!isWorker) {
+        setConversationId(nextConversationId);
+      }
+
+      // Workers cannot generate company-wide reports.
+      const exportAction = isWorker
+        ? null
+        : getRequestedExport(text);
+
       let attachment = null;
       let exportError = "";
 
       if (exportAction) {
         try {
-          attachment = await exportReport(exportAction, nextConversationId, text);
+          attachment = await exportReport(
+            exportAction,
+            nextConversationId,
+            text
+          );
         } catch (exportErr) {
-          exportError = exportErr?.message || "The report was generated, but the download file could not be created.";
+          exportError =
+            exportErr?.message ||
+            "The report download could not be created.";
         }
       }
 
@@ -163,7 +247,9 @@ export default function AIAssistantWidget() {
         {
           id: `assistant-${Date.now()}`,
           role: "assistant",
-          content: result.answer || "I couldn't generate an answer.",
+          content:
+            result.answer ||
+            "I couldn't generate an answer.",
           sources: result.sources || [],
           attachment,
           exportError,
@@ -171,8 +257,11 @@ export default function AIAssistantWidget() {
       ]);
     } catch (err) {
       setMessages((current) =>
-        current.filter((message) => message.id !== userMessage.id)
+        current.filter(
+          (message) => message.id !== userMessage.id
+        )
       );
+
       setQuestion(text);
       setError(getErrorMessage(err));
     } finally {
@@ -182,14 +271,31 @@ export default function AIAssistantWidget() {
 
   const startNewChat = async () => {
     setError("");
+
+    // A worker starts a fresh local chat only.
+    // Do not send the Admin/Founder "new" action.
+    if (isWorker) {
+      setMessages([]);
+      setQuestion("");
+      setConversationId(null);
+      inputRef.current?.focus();
+      return;
+    }
+
     setSending(true);
 
     try {
-      const response = await api.post("/knowledge/chat/", {
-        action: "new",
-      });
+      const response = await api.post(
+        chatEndpoint,
+        {
+          action: "new",
+        }
+      );
 
-      setConversationId(response.data.conversation_id);
+      setConversationId(
+        response.data.conversation_id
+      );
+
       setMessages([]);
       setQuestion("");
     } catch (err) {
@@ -200,9 +306,16 @@ export default function AIAssistantWidget() {
     }
   };
 
+  const assistantDescription = isWorker
+    ? "Ask about your assigned work orders"
+    : "Your business assistant";
+
+  const welcomeMessage = isWorker
+    ? "Ask a question about your assigned work orders."
+    : "Ask me a question about your company's knowledge or policies.";
+
   return (
     <>
-      {/* Floating assistant button */}
       {!open && (
         <button
           type="button"
@@ -212,11 +325,11 @@ export default function AIAssistantWidget() {
           className="fixed bottom-6 right-6 z-[100] flex h-14 w-14 items-center justify-center rounded-full bg-indigo-600 text-white shadow-xl transition hover:scale-105 hover:bg-indigo-700 focus:outline-none focus:ring-4 focus:ring-indigo-200"
         >
           <Bot size={27} />
+
           <span className="absolute -right-1 -top-1 flex h-4 w-4 rounded-full border-2 border-white bg-emerald-400" />
         </button>
       )}
 
-      {/* Floating chat panel */}
       {open && (
         <section
           aria-label="SEIYALAM AI assistant chat"
@@ -230,9 +343,12 @@ export default function AIAssistantWidget() {
               </div>
 
               <div>
-                <h2 className="text-sm font-bold">SEIYALAM AI</h2>
+                <h2 className="text-sm font-bold">
+                  SEIYALAM AI
+                </h2>
+
                 <p className="mt-0.5 text-xs text-indigo-100">
-                  Your business assistant
+                  {assistantDescription}
                 </p>
               </div>
             </div>
@@ -274,17 +390,23 @@ export default function AIAssistantWidget() {
                 </h3>
 
                 <p className="mt-2 text-sm leading-6 text-slate-500">
-                  Ask me a question about your company's knowledge or policies.
+                  {welcomeMessage}
                 </p>
 
                 <button
                   type="button"
                   onClick={() =>
-                    setQuestion("What can you help me with?")
+                    setQuestion(
+                      isWorker
+                        ? "What can you tell me about my assigned work orders?"
+                        : "What can you help me with?"
+                    )
                   }
                   className="mt-5 rounded-xl border border-indigo-200 bg-white px-4 py-3 text-left text-sm text-indigo-700 transition hover:bg-indigo-50"
                 >
-                  What can you help me with?
+                  {isWorker
+                    ? "Help with my work orders"
+                    : "What can you help me with?"}
                 </button>
               </div>
             )}
@@ -296,7 +418,9 @@ export default function AIAssistantWidget() {
                 <div
                   key={message.id}
                   className={`flex items-start gap-2 ${
-                    isUser ? "justify-end" : "justify-start"
+                    isUser
+                      ? "justify-end"
+                      : "justify-start"
                   }`}
                 >
                   {!isUser && (
@@ -321,10 +445,12 @@ export default function AIAssistantWidget() {
                         <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-white text-indigo-600">
                           <FileText size={18} />
                         </div>
+
                         <div className="min-w-0 flex-1">
                           <p className="truncate text-xs font-semibold text-slate-800">
                             {message.attachment.filename}
                           </p>
+
                           <p className="text-[11px] text-slate-500">
                             {message.attachment.fileType} report
                             {message.attachment.size
@@ -332,6 +458,7 @@ export default function AIAssistantWidget() {
                               : ""}
                           </p>
                         </div>
+
                         <a
                           href={message.attachment.url}
                           download={message.attachment.filename}
@@ -349,25 +476,28 @@ export default function AIAssistantWidget() {
                       </p>
                     )}
 
-                    {!isUser && message.sources?.length > 0 && (
-                      <div className="mt-3 border-t border-slate-100 pt-2">
-                        <p className="mb-1 text-xs font-semibold text-slate-500">
-                          Sources
-                        </p>
-
-                        {message.sources.map((source, index) => (
-                          <p
-                            key={`${index}-${source.title || source.name || "source"}`}
-                            className="text-xs text-slate-500"
-                          >
-                            {source.title ||
-                              source.name ||
-                              source.filename ||
-                              `Source ${index + 1}`}
+                    {!isUser &&
+                      message.sources?.length > 0 && (
+                        <div className="mt-3 border-t border-slate-100 pt-2">
+                          <p className="mb-1 text-xs font-semibold text-slate-500">
+                            Sources
                           </p>
-                        ))}
-                      </div>
-                    )}
+
+                          {message.sources.map(
+                            (source, index) => (
+                              <p
+                                key={`${index}-${source.title || source.name || "source"}`}
+                                className="text-xs text-slate-500"
+                              >
+                                {source.title ||
+                                  source.name ||
+                                  source.filename ||
+                                  `Source ${index + 1}`}
+                              </p>
+                            )
+                          )}
+                        </div>
+                      )}
                   </div>
 
                   {isUser && (
@@ -381,7 +511,10 @@ export default function AIAssistantWidget() {
 
             {sending && (
               <div className="flex items-center gap-2 text-sm text-slate-500">
-                <LoaderCircle size={17} className="animate-spin" />
+                <LoaderCircle
+                  size={17}
+                  className="animate-spin"
+                />
                 SEIYALAM AI is thinking...
               </div>
             )}
@@ -407,7 +540,9 @@ export default function AIAssistantWidget() {
               <textarea
                 ref={inputRef}
                 value={question}
-                onChange={(event) => setQuestion(event.target.value)}
+                onChange={(event) =>
+                  setQuestion(event.target.value)
+                }
                 onKeyDown={(event) => {
                   if (
                     event.key === "Enter" &&
@@ -427,7 +562,9 @@ export default function AIAssistantWidget() {
 
               <button
                 type="submit"
-                disabled={sending || question.trim().length < 2}
+                disabled={
+                  sending || question.trim().length < 2
+                }
                 aria-label="Send message"
                 className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-indigo-600 text-white transition hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-40"
               >
