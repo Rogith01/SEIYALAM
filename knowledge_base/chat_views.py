@@ -1318,97 +1318,691 @@ class IsCustomerOnly(BasePermission):
 
     def has_permission(self, request, view):
         user = request.user
-        return bool(user and user.is_authenticated and getattr(user, "role", None) == "CUSTOMER")
+        return bool(
+            user
+            and user.is_authenticated
+            and getattr(user, "role", None) == "CUSTOMER"
+        )
+
+
+def _customer_profile_answer(user):
+    """Return profile information or guidance without modifying customer data."""
+    name = (
+        getattr(user, "name", "")
+        or getattr(user, "get_full_name", lambda: "")()
+        or getattr(user, "username", "")
+        or "Not available"
+    )
+
+    parts = [f"Your name: {name}"]
+
+    for label, field in (
+        ("Username", "username"),
+        ("Email", "email"),
+        ("Phone", "phone"),
+        ("Address", "address"),
+    ):
+        value = getattr(user, field, "")
+        if value:
+            parts.append(f"{label}: {value}")
+
+    return "\n".join(parts)
+
+
+def _customer_request_details(item):
+    """Format a service request using the actual ServiceRequest model."""
+    created = timezone.localtime(item.created_at).strftime(
+        "%d %b %Y, %I:%M %p"
+    )
+    updated = timezone.localtime(item.updated_at).strftime(
+        "%d %b %Y, %I:%M %p"
+    )
+
+    parts = [
+        f"Service request: {item.request_number}",
+        f"Title: {item.title}",
+        f"Status: {item.get_status_display()}",
+        f"Company: {getattr(item.company, 'name', 'Not available')}",
+        f"Submitted: {created}",
+        f"Last updated: {updated}",
+    ]
+
+    if item.required_skill:
+        parts.append(f"Required skill: {item.required_skill}")
+
+    if item.description:
+        parts.append(f"Description: {item.description}")
+
+    if item.address:
+        parts.append(f"Address: {item.address}")
+
+    if item.customer_phone:
+        parts.append(f"Contact phone: {item.customer_phone}")
+
+    return "\n".join(parts)
 
 
 class CustomerKnowledgeChatView(generics.GenericAPIView):
-    """Customer-safe support chat with strict per-customer record isolation."""
+    """
+    Customer support chat.
+
+    Every service-request query is restricted to the authenticated customer.
+    Admin and Worker chatbot implementations remain unchanged.
+    """
+
     permission_classes = [IsAuthenticated, IsCustomerOnly]
     serializer_class = KnowledgeChatSerializer
 
     def post(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
+
         data = serializer.validated_data
         action = data.get("action", "chat")
         user = request.user
 
         if action != "chat":
-            return Response({"detail": "Customer support currently supports chat questions only."}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {
+                    "detail": (
+                        "Customer support currently supports "
+                        "chat questions only."
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         question = data.get("question", "").strip()
         normalized = _normalize_business_question(question)
-        # Never trust a customer/company ID supplied by the client.
-        requests_qs = ServiceRequest.objects.filter(customer_id=user.pk).select_related("company", "required_skill").order_by("-created_at")
+
+        # SECURITY: Never use a customer ID supplied by the client.
+        # The authenticated user determines which records can be accessed.
+        requests_qs = (
+            ServiceRequest.objects
+            .filter(customer_id=user.pk)
+            .select_related("company", "required_skill")
+            .order_by("-created_at", "-pk")
+        )
 
         denied_terms = (
-            "other customer", "other customers", "another customer", "all customers",
-            "customer list", "company report", "business report", "all company",
-            "company-wide", "company wide", "other people's", "other peoples",
+            "other customer",
+            "other customers",
+            "another customer",
+            "another customer's",
+            "all customers",
+            "customer list",
+            "company report",
+            "business report",
+            "all company",
+            "company-wide",
+            "company wide",
+            "other people's",
+            "other peoples",
+            "other users",
+            "other user's requests",
+            "everyone's requests",
         )
+
         if any(term in normalized for term in denied_terms):
-            answer = "For privacy, I can only share information about your own profile and service requests."
-        elif any(term in normalized for term in ("my name", "what is my name", "who am i", "my profile", "my account details", "my contact details")):
-            name = getattr(user, "name", "") or getattr(user, "get_full_name", lambda: "")() or getattr(user, "username", "") or "Not available"
-            parts = [f"Your name: {name}"]
-            for label, field in (("Username", "username"), ("Email", "email"), ("Phone", "phone"), ("Address", "address")):
-                value = getattr(user, field, "")
-                if value:
-                    parts.append(f"{label}: {value}")
-            answer = "\n".join(parts)
-        elif any(term in normalized for term in ("help", "what can you do", "what can i ask", "how can you help")):
-            answer = ("I can help with your own SEIYALAM service requests. Try asking:\n"
-                      "- Show my service requests.\n- What is the status of my latest request?\n"
-                      "- Check service request SR-0001.\n- Show my service history.\n"
-                      "- Which company is handling my request?")
+            answer = (
+                "For privacy, I can only share information about "
+                "your own profile and service requests."
+            )
+
         else:
-            match = re.search(r"\bSR[-\s]?\d+\b", question, flags=re.IGNORECASE)
-            target = None
-            if match:
-                candidate = match.group(0).strip().replace(" ", "-")
-                target = requests_qs.filter(request_number__iexact=candidate).first()
+            # Recognize profile-update guidance BEFORE general profile
+            # questions, so "How can I update my profile?" is handled
+            # correctly instead of returning profile details.
+            profile_update_terms = (
+                "update my profile",
+                "edit my profile",
+                "change my profile",
+                "update profile",
+                "edit profile",
+                "change profile",
+                "change my name",
+                "change my email",
+                "change my phone",
+                "update my phone",
+                "update my email",
+                "change my address",
+                "update my address",
+                "edit my details",
+                "update my details",
+                "change my details",
+                "correct my details",
+            )
 
-            asks_list = any(term in normalized for term in ("my service requests", "list my requests", "show my requests", "my service history", "service history", "all my requests", "show my service requests", "my requests"))
-            asks_latest = any(term in normalized for term in ("latest request", "most recent request", "last request"))
-            asks_status = any(term in normalized for term in ("status", "progress", "update", "where is my request", "what happened"))
-            asks_company = any(term in normalized for term in ("which company", "company handling", "assigned company"))
+            asks_profile_update = any(
+                term in normalized for term in profile_update_terms
+            )
 
-            if target:
-                parts = [f"Service request: {target.request_number}", f"Title: {target.title}", f"Status: {target.get_status_display()}", f"Company: {getattr(target.company, 'name', 'Not available')}", f"Submitted: {timezone.localtime(target.created_at).strftime('%d %b %Y, %I:%M %p')}", f"Last updated: {timezone.localtime(target.updated_at).strftime('%d %b %Y, %I:%M %p')}"]
-                if target.required_skill:
-                    parts.append(f"Required skill: {target.required_skill}")
-                answer = "\n".join(parts)
-            elif asks_latest or (asks_status and not asks_list):
-                latest = requests_qs.first()
-                if latest is None:
-                    answer = "You haven't submitted any service requests yet."
-                elif asks_company:
-                    answer = f"Your latest request ({latest.request_number}) is with {latest.company.name}. Current status: {latest.get_status_display()}."
-                else:
-                    answer = (f"Your latest service request is {latest.request_number} — {latest.title}. Current status: {latest.get_status_display()}. "
-                              f"Company: {latest.company.name}. Last updated: {timezone.localtime(latest.updated_at).strftime('%d %b %Y, %I:%M %p')}.")
-            elif asks_list:
-                items = list(requests_qs[:20])
-                if not items:
-                    answer = "You haven't submitted any service requests yet."
-                else:
-                    lines = ["Your recent service requests:"]
-                    for item in items:
-                        created = timezone.localtime(item.created_at).strftime("%d %b %Y")
-                        lines.append(f"- {item.request_number}: {item.title} — {item.get_status_display()} (submitted {created}; company: {item.company.name})")
-                    if requests_qs.count() > 20:
-                        lines.append("Showing the 20 most recent requests.")
-                    answer = "\n".join(lines)
-            elif match:
-                answer = "I couldn't find that service request in your account. Please check the request number and try again."
-            elif asks_company:
-                latest = requests_qs.first()
-                answer = f"Your latest request is handled by {latest.company.name}." if latest else "You don't have any service requests linked to a company yet."
+            if asks_profile_update:
+                answer = (
+                    "To update your profile, open your SEIYALAM customer "
+                    "account and go to the Profile or Account Settings "
+                    "section, if available. Edit the information you want "
+                    "to change and save your changes. If you cannot find "
+                    "the profile-edit option, contact your service "
+                    "provider or administrator for assistance. I can "
+                    "explain the steps, but I cannot change your profile "
+                    "directly from this chat."
+                )
+
+            elif any(
+                term in normalized
+                for term in (
+                    "my name",
+                    "what is my name",
+                    "who am i",
+                    "my profile",
+                    "my account details",
+                    "my contact details",
+                    "show my details",
+                    "show my profile",
+                    "my personal details",
+                )
+            ):
+                answer = _customer_profile_answer(user)
+
+            elif any(
+                term in normalized
+                for term in (
+                    "help",
+                    "what can you do",
+                    "what can i ask",
+                    "how can you help",
+                    "available commands",
+                )
+            ):
+                answer = (
+                    "I can help you with your own SEIYALAM account "
+                    "and service requests.\n\n"
+                    "Try asking:\n"
+                    "- Show my service requests.\n"
+                    "- Show my latest service request.\n"
+                    "- What is the status of my service requests?\n"
+                    "- How many pending service requests do I have?\n"
+                    "- Show my completed service requests.\n"
+                    "- Show my requests that are in progress.\n"
+                    "- Check service request SR-0001.\n"
+                    "- When did I submit my latest request?\n"
+                    "- How do I create a new service request?\n"
+                    "- How can I update my profile?"
+                )
+
             else:
-                answer = ("I can answer questions about your profile and your own service requests. Try “show my service requests,” "
-                          "“what is the status of my latest request?” or “check service request SR-0001.”")
+                answer = self._answer_customer_question(
+                    question=question,
+                    normalized=normalized,
+                    requests_qs=requests_qs,
+                )
 
-        return Response({"question": question, "answer": answer, "used_ai": False,
-                         "sources": [{"name": "Your Service Requests", "title": "Your Service Requests"}]},
-                        status=status.HTTP_200_OK)
+        return Response(
+            {
+                "question": question,
+                "answer": answer,
+                "used_ai": False,
+                "sources": [
+                    {
+                        "name": "Your Service Requests",
+                        "title": "Your Service Requests",
+                    }
+                ],
+            },
+            status=status.HTTP_200_OK,
+        )
 
+    def _answer_customer_question(
+        self,
+        question,
+        normalized,
+        requests_qs,
+    ):
+        """Answer supported questions using the customer's own records."""
+
+        # Identify explicit service-request numbers, e.g. SR-0001.
+        match = re.search(
+            r"\bSR[-\s]?\d+\b",
+            question,
+            flags=re.IGNORECASE,
+        )
+
+        target = None
+
+        if match:
+            candidate = match.group(0).strip().upper()
+            candidate = re.sub(r"\s+", "-", candidate)
+
+            # Only search the authenticated customer's own requests.
+            target = requests_qs.filter(
+                request_number__iexact=candidate
+            ).first()
+
+            if target is not None:
+                return _customer_request_details(target)
+
+        # Request classification.
+        asks_latest = any(
+            term in normalized
+            for term in (
+                "latest request",
+                "latest service request",
+                "most recent request",
+                "most recent service request",
+                "last request",
+                "last service request",
+                "newest request",
+                "newest service request",
+                "my latest",
+                "my most recent",
+            )
+        )
+
+        asks_pending = any(
+            term in normalized
+            for term in (
+                "pending",
+                "awaiting",
+                "not completed",
+                "still waiting",
+                "not finished",
+                "open request",
+                "open requests",
+            )
+        )
+
+        asks_completed = any(
+            term in normalized
+            for term in (
+                "completed",
+                "complete request",
+                "complete requests",
+                "finished request",
+                "finished requests",
+                "resolved request",
+                "resolved requests",
+            )
+        )
+
+        asks_in_progress = any(
+            term in normalized
+            for term in (
+                "in progress",
+                "in-progress",
+                "being processed",
+                "currently processing",
+                "currently being handled",
+            )
+        )
+
+        asks_cancelled = any(
+            term in normalized
+            for term in (
+                "cancelled",
+                "canceled",
+                "rejected",
+            )
+        )
+
+        asks_closed = (
+            "closed" in normalized
+            and not asks_completed
+        )
+
+        asks_status = any(
+            term in normalized
+            for term in (
+                "status",
+                "progress",
+                "where is my request",
+                "what happened to my request",
+                "what is happening with my request",
+                "how is my request",
+                "request update",
+                "request updates",
+            )
+        )
+
+        asks_count = any(
+            term in normalized
+            for term in (
+                "how many",
+                "count",
+                "number of",
+                "total",
+                "quantity",
+            )
+        )
+
+        asks_company = any(
+            term in normalized
+            for term in (
+                "which company",
+                "company handling",
+                "assigned company",
+                "who is handling",
+                "who handles",
+            )
+        )
+
+        asks_creation_help = any(
+            term in normalized
+            for term in (
+                "create a new service request",
+                "create new service request",
+                "raise a service request",
+                "submit a service request",
+                "submit new request",
+                "create a request",
+                "raise a request",
+                "how do i create",
+                "how can i create",
+                "how to create",
+                "how do i submit",
+                "how can i submit",
+                "how to submit",
+            )
+        )
+
+        asks_history = any(
+            term in normalized
+            for term in (
+                "service history",
+                "request history",
+                "previous requests",
+                "past requests",
+                "old requests",
+            )
+        )
+
+        asks_list = any(
+            term in normalized
+            for term in (
+                "my service requests",
+                "show my requests",
+                "list my requests",
+                "list my service requests",
+                "show all my requests",
+                "show all service requests",
+                "all my requests",
+                "my requests",
+                "service request list",
+                "list service requests",
+                "display my requests",
+                "show my service history",
+                "my service history",
+                "request history",
+                "service history",
+                "previous requests",
+                "past requests",
+                "old requests",
+            )
+        )
+
+        # Help customers create a request without claiming the chatbot
+        # can submit one itself.
+        if asks_creation_help:
+            return (
+                "To create a new service request, sign in to your "
+                "SEIYALAM customer account and open the Service Requests "
+                "section. Choose the option to create or submit a request, "
+                "enter the issue title and description, select the relevant "
+                "company or service category if requested, provide your "
+                "address and contact details, and submit the form. "
+                "The exact fields depend on the options available in your "
+                "customer portal. I cannot submit the request directly "
+                "from this chat."
+            )
+
+        # No request number found in this customer's own records.
+        if match and target is None:
+            return (
+                "I couldn't find that service request in your account. "
+                "Please check the request number and try again. I can "
+                "only access requests associated with your account."
+            )
+
+        # Status categories use the real ServiceRequest status values:
+        # NEW, ASSIGNED, IN_PROGRESS, COMPLETED, and CLOSED.
+        if asks_pending:
+            filtered = requests_qs.filter(
+                status__in=[
+                    ServiceRequest.Status.NEW,
+                    ServiceRequest.Status.ASSIGNED,
+                    ServiceRequest.Status.IN_PROGRESS,
+                ]
+            )
+
+            label = "pending"
+
+        elif asks_in_progress:
+            filtered = requests_qs.filter(
+                status=ServiceRequest.Status.IN_PROGRESS
+            )
+            label = "in-progress"
+
+        elif asks_completed:
+            filtered = requests_qs.filter(
+                status=ServiceRequest.Status.COMPLETED
+            )
+            label = "completed"
+
+        elif asks_cancelled:
+            filtered = requests_qs.filter(
+                status=ServiceRequest.Status.CLOSED
+            )
+            label = "closed"
+
+        elif asks_closed:
+            filtered = requests_qs.filter(
+                status=ServiceRequest.Status.CLOSED
+            )
+            label = "closed"
+
+        else:
+            filtered = None
+            label = ""
+
+        if filtered is not None:
+            items = list(filtered[:20])
+            count = filtered.count()
+
+            if asks_count:
+                return (
+                    f"You have {count} {label} service request"
+                    f"{'' if count == 1 else 's'}."
+                )
+
+            if not items:
+                return (
+                    f"You don't have any {label} service requests "
+                    "in your account right now."
+                )
+
+            lines = [f"Your {label} service requests:"]
+
+            for item in items:
+                created = timezone.localtime(
+                    item.created_at
+                ).strftime("%d %b %Y")
+
+                lines.append(
+                    f"- {item.request_number}: {item.title} — "
+                    f"{item.get_status_display()} "
+                    f"(submitted {created}; company: "
+                    f"{getattr(item.company, 'name', 'Not available')})"
+                )
+
+            if count > 20:
+                lines.append(
+                    "Showing the 20 most recent matching requests."
+                )
+
+            return "\n".join(lines)
+
+        # Latest request questions should be handled before the general list
+        # and status questions.
+        if asks_latest:
+            latest = requests_qs.first()
+
+            if latest is None:
+                return (
+                    "You haven't submitted any service requests yet."
+                )
+
+            if asks_company:
+                return (
+                    f"Your latest request ({latest.request_number}) "
+                    f"is with {latest.company.name}. "
+                    f"Current status: {latest.get_status_display()}."
+                )
+
+            return _customer_request_details(latest)
+
+        # Status questions about all requests should return a concise
+        # summary instead of listing every request.
+        if asks_status and not asks_list and not asks_history:
+            total = requests_qs.count()
+
+            if total == 0:
+                return (
+                    "You haven't submitted any service requests yet."
+                )
+
+            counts = {}
+
+            for status_value, display_label in (
+                (ServiceRequest.Status.NEW, "New"),
+                (ServiceRequest.Status.ASSIGNED, "Assigned"),
+                (ServiceRequest.Status.IN_PROGRESS, "In progress"),
+                (ServiceRequest.Status.COMPLETED, "Completed"),
+                (ServiceRequest.Status.CLOSED, "Closed"),
+            ):
+                counts[display_label] = requests_qs.filter(
+                    status=status_value
+                ).count()
+
+            lines = [
+                f"You have {total} service request"
+                f"{'' if total == 1 else 's'} in total.",
+                "Current status summary:",
+            ]
+
+            for label_name, count in counts.items():
+                if count:
+                    lines.append(f"- {label_name}: {count}")
+
+            lines.append(
+                "Ask about a specific request number for its full details."
+            )
+
+            return "\n".join(lines)
+
+        # The customer explicitly asked for a request list/history.
+        if asks_list or asks_history:
+            items = list(requests_qs[:20])
+            total = requests_qs.count()
+
+            if not items:
+                return (
+                    "You haven't submitted any service requests yet."
+                )
+
+            lines = ["Your recent service requests:"]
+
+            for item in items:
+                created = timezone.localtime(
+                    item.created_at
+                ).strftime("%d %b %Y")
+
+                lines.append(
+                    f"- {item.request_number}: {item.title} — "
+                    f"{item.get_status_display()} "
+                    f"(submitted {created}; company: "
+                    f"{getattr(item.company, 'name', 'Not available')})"
+                )
+
+            if total > 20:
+                lines.append(
+                    f"Showing 20 of your {total} service requests."
+                )
+
+            return "\n".join(lines)
+
+        # Questions about which company is handling the customer's request.
+        if asks_company:
+            latest = requests_qs.first()
+
+            if latest is None:
+                return (
+                    "You don't have any service requests linked to a "
+                    "company yet."
+                )
+
+            return (
+                f"Your latest request is handled by "
+                f"{latest.company.name}. "
+                f"Request number: {latest.request_number}. "
+                f"Status: {latest.get_status_display()}."
+            )
+
+        # A specific date question can be answered from the latest request.
+        if any(
+            term in normalized
+            for term in (
+                "when did i submit",
+                "when did i create",
+                "submission date",
+                "submitted date",
+                "when was my latest",
+            )
+        ):
+            latest = requests_qs.first()
+
+            if latest is None:
+                return (
+                    "You haven't submitted any service requests yet."
+                )
+
+            created = timezone.localtime(
+                latest.created_at
+            ).strftime("%d %b %Y, %I:%M %p")
+
+            return (
+                f"Your latest request, {latest.request_number}, "
+                f"was submitted on {created}."
+            )
+
+        # A direct total-count question.
+        if asks_count and any(
+            term in normalized
+            for term in (
+                "service request",
+                "service requests",
+                "my requests",
+                "requests do i have",
+                "requests have i",
+            )
+        ):
+            total = requests_qs.count()
+
+            return (
+                f"You have {total} service request"
+                f"{'' if total == 1 else 's'} in total."
+            )
+
+        # Useful fallback: explain the supported questions clearly.
+        return (
+            "I can help with your own profile and service requests. "
+            "Try asking:\n"
+            "- Show my service requests.\n"
+            "- Show my latest service request.\n"
+            "- What is the status of my service requests?\n"
+            "- How many pending service requests do I have?\n"
+            "- Show my completed service requests.\n"
+            "- Show my in-progress service requests.\n"
+            "- Check service request SR-0001.\n"
+            "- How do I create a new service request?\n"
+            "- How can I update my profile?"
+        )
