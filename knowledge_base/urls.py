@@ -1,6 +1,10 @@
 from django.urls import path
 
-from .chat_views import KnowledgeChatView, WorkerKnowledgeChatView
+from .chat_views import (
+    KnowledgeChatView,
+    WorkerKnowledgeChatView,
+    CustomerKnowledgeChatView,
+)
 from .views import (
     CompanyDocumentListCreateView,
     CompanyDocumentSearchView,
@@ -27,6 +31,11 @@ urlpatterns = [
         "chat/",
         KnowledgeChatView.as_view(),
         name="knowledge-chat",
+    ),
+    path(
+        "customer-chat/",
+        CustomerKnowledgeChatView.as_view(),
+        name="customer-knowledge-chat",
     ),
     path(
         "worker-chat/",

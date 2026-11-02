@@ -123,12 +123,15 @@ export default function AIAssistantWidget() {
 
   const role = String(user?.role || "").toUpperCase();
   const isWorker = role === "WORKER";
+  const isCustomer = role === "CUSTOMER";
 
   // Workers use the restricted worker-chat endpoint.
   // Admins and Founders retain the existing endpoint.
-  const chatEndpoint = isWorker
-    ? "/knowledge/worker-chat/"
-    : "/knowledge/chat/";
+  const chatEndpoint = isCustomer
+    ? "/knowledge/customer-chat/"
+    : isWorker
+      ? "/knowledge/worker-chat/"
+      : "/knowledge/chat/";
 
   const [open, setOpen] = useState(false);
   const [question, setQuestion] = useState("");
@@ -197,7 +200,7 @@ export default function AIAssistantWidget() {
 
       // Only Admin/Founder use the original retrieval settings
       // and company-wide conversation identifiers.
-      if (!isWorker) {
+      if (!isWorker && !isCustomer) {
         payload.retrieval_mode = "keyword";
 
         if (conversationId) {
@@ -212,16 +215,16 @@ export default function AIAssistantWidget() {
 
       const result = response.data;
 
-      const nextConversationId = isWorker
+      const nextConversationId = (isWorker || isCustomer)
         ? null
         : result.conversation_id || conversationId;
 
-      if (!isWorker) {
+      if (!isWorker && !isCustomer) {
         setConversationId(nextConversationId);
       }
 
       // Workers cannot generate company-wide reports.
-      const exportAction = isWorker
+      const exportAction = (isWorker || isCustomer)
         ? null
         : getRequestedExport(text);
 
@@ -274,7 +277,7 @@ export default function AIAssistantWidget() {
 
     // A worker starts a fresh local chat only.
     // Do not send the Admin/Founder "new" action.
-    if (isWorker) {
+    if (isWorker || isCustomer) {
       setMessages([]);
       setQuestion("");
       setConversationId(null);
@@ -306,13 +309,17 @@ export default function AIAssistantWidget() {
     }
   };
 
-  const assistantDescription = isWorker
-    ? "Ask about your assigned work orders"
-    : "Your business assistant";
+  const assistantDescription = isCustomer
+    ? "Help with your service requests"
+    : isWorker
+      ? "Ask about your assigned work orders"
+      : "Your business assistant";
 
-  const welcomeMessage = isWorker
-    ? "Ask a question about your assigned work orders."
-    : "Ask me a question about your company's knowledge or policies.";
+  const welcomeMessage = isCustomer
+    ? "Ask about your service requests, request status, or account details."
+    : isWorker
+      ? "Ask a question about your assigned work orders."
+      : "Ask me a question about your company's knowledge or policies.";
 
   return (
     <>
@@ -397,16 +404,20 @@ export default function AIAssistantWidget() {
                   type="button"
                   onClick={() =>
                     setQuestion(
-                      isWorker
-                        ? "What can you tell me about my assigned work orders?"
-                        : "What can you help me with?"
+                      isCustomer
+                        ? "Show my service requests"
+                        : isWorker
+                          ? "What can you tell me about my assigned work orders?"
+                          : "What can you help me with?"
                     )
                   }
                   className="mt-5 rounded-xl border border-indigo-200 bg-white px-4 py-3 text-left text-sm text-indigo-700 transition hover:bg-indigo-50"
                 >
-                  {isWorker
-                    ? "Help with my work orders"
-                    : "What can you help me with?"}
+                  {isCustomer
+                    ? "Show my service requests"
+                    : isWorker
+                      ? "Help with my work orders"
+                      : "What can you help me with?"}
                 </button>
               </div>
             )}

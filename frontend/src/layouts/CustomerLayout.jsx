@@ -22,6 +22,7 @@ import {
 import { useAuth } from "../context/AuthContext";
 import api from "../services/api";
 import PlatformAnnouncement from "../components/PlatformAnnouncement";
+import AIAssistantWidget from "../components/AIAssistantWidget";
 
 const menuItems = [
   {
@@ -638,6 +639,11 @@ const CustomerLayout = ({ children }) => {
           {children}
         </main>
       </div>
+
+      {/* Shared AI assistant, routed to the customer-only backend by role. */}
+      {String(user?.role || "").toUpperCase() === "CUSTOMER" && (
+        <AIAssistantWidget />
+      )}
 
       {/* Notification backdrop */}
       {notificationOpen && (
