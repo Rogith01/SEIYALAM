@@ -1,5 +1,6 @@
 
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
+import AndroidApkUpdater from "../AndroidApkUpdater";
 import {
   ActivityIndicator,
   Alert,
@@ -26,7 +27,20 @@ const API_URL = "https://seiyalam.onrender.com/api";
 const TOKEN_KEY = "seiyalam_access";
 const REFRESH_KEY = "seiyalam_refresh";
 
-const C = {
+type ThemePalette = {
+  navy: string;
+  primary: string;
+  background: string;
+  white: string;
+  text: string;
+  muted: string;
+  border: string;
+  red: string;
+  green: string;
+  paleBlue: string;
+};
+
+const LIGHT_THEME: ThemePalette = {
   navy: "#080D20",
   primary: "#205DF5",
   background: "#F1F5F9",
@@ -38,6 +52,23 @@ const C = {
   green: "#15803D",
   paleBlue: "#EFF6FF",
 };
+
+const DARK_THEME: ThemePalette = {
+  navy: "#F8FAFC",
+  primary: "#78A9FF",
+  background: "#0B1220",
+  white: "#111C2E",
+  text: "#E5EAF2",
+  muted: "#A0AEC0",
+  border: "#29364A",
+  red: "#FB7185",
+  green: "#4ADE80",
+  paleBlue: "#1B3150",
+};
+
+// The active palette and stylesheet are refreshed by Index when the user
+// changes the saved appearance preference.
+let C: ThemePalette = LIGHT_THEME;
 
 type Data = Record<string, any>;
 type Page =
@@ -51,6 +82,7 @@ type Page =
   | "notifications"
   | "profile"
   | "support"
+  | "aiAssistant"
   | "register";
 
 const api = axios.create({ baseURL: API_URL, timeout: 60000 });
@@ -264,6 +296,17 @@ export default function Index() {
   const [page, setPage] = useState<Page>("dashboard");
   const [sidebar, setSidebar] = useState(false);
   const [profileMenu, setProfileMenu] = useState(false);
+  const [themeMode, setThemeMode] = useState<"light" | "dark">("light");
+  const [themeLoaded, setThemeLoaded] = useState(false);
+
+  // Share one selected palette across Customer and Worker screens.
+  const activePalette = themeMode === "dark" ? DARK_THEME : LIGHT_THEME;
+  const activeStyles = useMemo(() => {
+    C = activePalette;
+    return createStyles();
+  }, [activePalette]);
+  C = activePalette;
+  styles = activeStyles;
   const [loading, setLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState("");
@@ -295,6 +338,13 @@ export default function Index() {
   const [notifications, setNotifications] = useState<Data[]>([]);
   const [companies, setCompanies] = useState<Data[]>([]);
   const [support, setSupport] = useState<Data>({});
+
+  // Role-specific SEIYALAM AI assistant (Customer and Worker).
+  const [aiOpen, setAiOpen] = useState(false);
+  const [aiQuestion, setAiQuestion] = useState("");
+  const [aiMessages, setAiMessages] = useState<{ id: string; role: "user" | "assistant"; content: string; sources?: any[] }[]>([]);
+  const [aiSending, setAiSending] = useState(false);
+  const [aiError, setAiError] = useState("");
 
   // Values supplied by Founder Settings through /platform/settings/
   const platformName = String(support?.platform?.name || "SEIYALAM");
@@ -433,6 +483,35 @@ export default function Index() {
   useEffect(() => {
     void restoreSession();
   }, [restoreSession]);
+
+  useEffect(() => {
+    let mounted = true;
+
+    const loadThemePreference = async () => {
+      try {
+        const savedTheme = await AsyncStorage.getItem("seiyalam_theme");
+        if (mounted && (savedTheme === "light" || savedTheme === "dark")) {
+          setThemeMode(savedTheme);
+        }
+      } catch (error) {
+        console.log("Unable to load theme preference:", error);
+      } finally {
+        if (mounted) setThemeLoaded(true);
+      }
+    };
+
+    void loadThemePreference();
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!themeLoaded) return;
+    void AsyncStorage.setItem("seiyalam_theme", themeMode).catch((error) => {
+      console.log("Unable to save theme preference:", error);
+    });
+  }, [themeMode, themeLoaded]);
 
   const refresh = async () => {
     setRefreshing(true);
@@ -609,6 +688,9 @@ export default function Index() {
     setLoginData({ username: "", password: "" });
 
     setPortalRole("customer");
+    setAiMessages([]);
+    setAiQuestion("");
+    setAiError("");
     await AsyncStorage.multiRemove([TOKEN_KEY, REFRESH_KEY, "seiyalam_portal_role"]);
   };
 
@@ -2045,6 +2127,122 @@ location_longitude: Number(coords.longitude.toFixed(6)),
     </>;
   };
 
+  const sendAiMessage = async () => {
+    const question = aiQuestion.trim();
+    if (question.length < 2 || aiSending) return;
+
+    const userMessage = {
+      id: `user-${Date.now()}`,
+      role: "user" as const,
+      content: question,
+    };
+    setAiMessages((current) => [...current, userMessage]);
+    setAiQuestion("");
+    setAiSending(true);
+    setAiError("");
+
+    // These endpoints enforce the different data permissions for each role.
+    const endpoint = portalRole === "worker"
+      ? "/knowledge/worker-chat/"
+      : "/knowledge/customer-chat/";
+
+    try {
+      const response = await api.post(endpoint, {
+        action: "chat",
+        question,
+      });
+      const answer = String(response.data?.answer || "I could not find a reliable answer for that question. Try adding the request number or a little more detail.");
+      setAiMessages((current) => [
+        ...current,
+        {
+          id: `assistant-${Date.now()}`,
+          role: "assistant" as const,
+          content: answer,
+          sources: Array.isArray(response.data?.sources) ? response.data.sources : [],
+        },
+      ]);
+    } catch (e: any) {
+      setAiMessages((current) => current.filter((item) => item.id !== userMessage.id));
+      setAiQuestion(question);
+      const status = e?.response?.status;
+      setAiError(status === 401
+        ? "Your session has expired. Please sign in again."
+        : status === 403
+          ? "You don't have permission to access this information."
+          : message(e));
+    } finally {
+      setAiSending(false);
+    }
+  };
+
+  const startNewAiChat = () => {
+    setAiMessages([]);
+    setAiQuestion("");
+    setAiError("");
+  };
+
+  const renderAiAssistant = () => {
+    const welcome = portalRole === "worker"
+      ? "Ask about your assigned work orders, job details, work progress, or worker-related guidance."
+      : "Ask about your service requests, request status, work orders, or your customer account.";
+
+    return <>
+      <View style={styles.aiHeadingRow}>
+        <View style={{ flex: 1 }}>
+          <Text style={styles.aiPanelTitle}>SEIYALAM AI</Text>
+          <Text style={styles.muted}>{portalRole === "worker" ? "Worker work assistant" : "Customer service assistant"}</Text>
+        </View>
+        <Pressable onPress={startNewAiChat} style={styles.aiNewChat}><Text style={styles.aiNewChatText}>＋ New</Text></Pressable>
+      </View>
+      <View style={styles.aiChatCard}>
+        {aiMessages.length === 0 ? (
+          <View style={styles.aiWelcome}>
+            <Text style={styles.aiWelcomeIcon}>✦</Text>
+            <Text style={styles.aiWelcomeTitle}>How can I help you?</Text>
+            <Text style={styles.aiWelcomeText}>{welcome}</Text>
+            <View style={styles.aiSuggestions}>
+              {(portalRole === "worker"
+                ? ["Show my assigned work orders", "How do I update work progress?", "What should I do before closing a job?"]
+                : ["How can I track my service request?", "What does my request status mean?", "How do I contact support?"]
+              ).map((prompt) => (
+                <Pressable key={prompt} style={styles.aiSuggestion} onPress={() => setAiQuestion(prompt)}>
+                  <Text style={styles.aiSuggestionText}>{prompt}</Text>
+                </Pressable>
+              ))}
+            </View>
+          </View>
+        ) : aiMessages.map((item) => (
+          <View key={item.id} style={[styles.aiMessageRow, item.role === "user" ? styles.aiUserRow : styles.aiAssistantRow]}>
+            <View style={[styles.aiBubble, item.role === "user" ? styles.aiUserBubble : styles.aiAssistantBubble]}>
+              <Text style={[styles.aiMessageText, item.role === "user" && styles.aiUserMessageText]}>{item.content}</Text>
+              {!!item.sources?.length && <Text style={styles.aiSources}>Sources: {item.sources.map((source: any) => typeof source === "string" ? source : source.title || source.name || source.source || "Reference").join(" · ")}</Text>}
+            </View>
+          </View>
+        ))}
+        {aiSending && <View style={styles.aiTyping}><ActivityIndicator size="small" color={C.primary} /><Text style={styles.muted}>SEIYALAM AI is thinking...</Text></View>}
+      </View>
+      {!!aiError && <View style={styles.errorBox}><Text style={styles.errorText}>{aiError}</Text></View>}
+      <View style={styles.aiComposer}>
+        <TextInput
+          value={aiQuestion}
+          onChangeText={setAiQuestion}
+          placeholder="Ask your question..."
+          placeholderTextColor="#94A3B8"
+          multiline
+          maxLength={2000}
+          editable={!aiSending}
+          style={styles.aiInput}
+          onSubmitEditing={() => void sendAiMessage()}
+          blurOnSubmit={false}
+        />
+        <Pressable accessibilityRole="button" accessibilityLabel="Send message" disabled={aiSending || aiQuestion.trim().length < 2} onPress={() => void sendAiMessage()} style={[styles.aiSendButton, (aiSending || aiQuestion.trim().length < 2) && styles.aiSendDisabled]}>
+          <Text style={styles.aiSendText}>{aiSending ? "…" : "➤"}</Text>
+        </Pressable>
+      </View>
+      <Text style={styles.aiDisclaimer}>AI responses may not always be accurate. Verify important information with your company or service team.</Text>
+    </>;
+  };
+
   const renderContent = () => {
     switch (page) {
       case "workerDashboard":
@@ -2094,7 +2292,13 @@ location_longitude: Number(coords.longitude.toFixed(6)),
   if (loading && !authenticated) {
     return (
       <SafeAreaView style={styles.safe}>
-        <StatusBar barStyle="light-content" backgroundColor={C.navy} />
+        <AndroidApkUpdater />
+        <StatusBar
+  barStyle={themeMode === "dark" ? "light-content" : "dark-content"}
+/>
+          <StatusBar
+  barStyle={themeMode === "dark" ? "light-content" : "dark-content"}
+/>
         <View style={styles.center}>
           <ActivityIndicator size="large" color={C.primary} />
           <Text style={styles.muted}>Connecting to {platformName}...</Text>
@@ -2109,9 +2313,9 @@ if (!authenticated) {
 
   return (
     <SafeAreaView style={styles.safe}>
+      <AndroidApkUpdater />
       <StatusBar
-        barStyle="light-content"
-        backgroundColor={C.navy}
+        barStyle={themeMode === "dark" ? "light-content" : "dark-content"}
       />
 
       <ScrollView
@@ -2127,7 +2331,7 @@ if (!authenticated) {
 
           <Text style={styles.authBrand}>{platformName}</Text>
 <Text style={styles.authSubtitle}>
-  SERVICE MANAGEMENT PLATFORM - UPDATE TEST
+  SERVICE MANAGEMENT PLATFORM
 </Text>
         </View>
 
@@ -2307,11 +2511,10 @@ if (!authenticated) {
 
   return (
     <SafeAreaView style={styles.safe}>
+      <AndroidApkUpdater />
       <StatusBar
-  barStyle="dark-content"
-  backgroundColor={C.white}
-  translucent={false}
-/>
+        barStyle={themeMode === "dark" ? "light-content" : "dark-content"}
+      />
 
       {renderHeader()}
 
@@ -2473,6 +2676,28 @@ if (!authenticated) {
             </View>
 
             <View style={styles.profileMenuDivider} />
+
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={`Switch to ${themeMode === "dark" ? "light" : "dark"} mode`}
+              style={[
+                styles.profileMenuItem,
+                {
+                  backgroundColor: C.paleBlue,
+                  borderRadius: 10,
+                  paddingHorizontal: 10,
+                  marginBottom: 6,
+                },
+              ]}
+              onPress={() => setThemeMode((current) => current === "dark" ? "light" : "dark")}
+            >
+              <Text style={styles.profileMenuItemIcon}>
+                {themeMode === "dark" ? "☀️" : "🌙"}
+              </Text>
+              <Text style={styles.profileMenuItemText}>
+                {themeMode === "dark" ? "Switch to Light Mode" : "Switch to Dark Mode"}
+              </Text>
+            </Pressable>
 
             <Pressable
               accessibilityRole="button"
@@ -2652,11 +2877,56 @@ if (!authenticated) {
           </ScrollView>
         </View>
       </Modal>
+
+      {/* Floating AI assistant - available throughout authenticated Customer and Worker portals */}
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel="Open SEIYALAM AI assistant"
+        onPress={() => setAiOpen(true)}
+        style={styles.aiFloatingButton}
+      >
+        <Text style={styles.aiFloatingIcon}>✦</Text>
+        <View style={styles.aiOnlineDot} />
+      </Pressable>
+
+      <Modal
+        visible={aiOpen}
+        transparent
+        animationType="slide"
+        statusBarTranslucent
+        onRequestClose={() => setAiOpen(false)}
+      >
+        <KeyboardAvoidingView
+          style={styles.aiModalBackdrop}
+          behavior={Platform.OS === "ios" ? "padding" : undefined}
+        >
+          <Pressable style={StyleSheet.absoluteFill} onPress={() => setAiOpen(false)} />
+          <View style={styles.aiModalPanel}>
+            <View style={styles.aiModalTopBar}>
+              <View style={styles.aiModalBrandIcon}><Text style={styles.aiModalBrandIconText}>✦</Text></View>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.aiModalBrand}>SEIYALAM AI</Text>
+                <Text style={styles.aiModalSubtitle}>{portalRole === "worker" ? "Worker assistant" : "Customer assistant"} · Ready to help</Text>
+              </View>
+              <Pressable accessibilityRole="button" accessibilityLabel="Close AI assistant" onPress={() => setAiOpen(false)} style={styles.aiModalClose}>
+                <Text style={styles.aiModalCloseText}>×</Text>
+              </Pressable>
+            </View>
+            <ScrollView
+              style={styles.aiModalScroll}
+              contentContainerStyle={styles.aiModalScrollContent}
+              keyboardShouldPersistTaps="handled"
+            >
+              {renderAiAssistant()}
+            </ScrollView>
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
     </SafeAreaView>
   );
 }
 
-const styles = StyleSheet.create({
+const createStyles = () => StyleSheet.create({
 
   safe: {
     flex: 1,
@@ -2973,6 +3243,166 @@ pageTitle: {
     minHeight: 46,
     fontSize: 14,
     color: C.text,
+  },
+  aiFloatingButton: {
+    position: "absolute",
+    right: 20,
+    bottom: 24,
+    width: 60,
+    height: 60,
+    borderRadius: 30,
+    backgroundColor: C.primary,
+    alignItems: "center",
+    justifyContent: "center",
+    elevation: 9,
+    shadowColor: "#000",
+    shadowOpacity: 0.25,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 4 },
+    zIndex: 20,
+  },
+  aiFloatingIcon: { color: C.white, fontSize: 30, fontWeight: "900" },
+  aiOnlineDot: { position: "absolute", right: 3, top: 3, width: 12, height: 12, borderRadius: 6, backgroundColor: "#22C55E", borderWidth: 2, borderColor: C.white },
+  aiModalBackdrop: { flex: 1, backgroundColor: "rgba(4,10,25,0.52)", justifyContent: "flex-end", padding: 10 },
+  aiModalPanel: { height: "82%", maxHeight: 720, width: "100%", maxWidth: 620, alignSelf: "center", backgroundColor: C.background, borderRadius: 22, overflow: "hidden", elevation: 18 },
+  aiModalTopBar: { minHeight: 70, backgroundColor: C.white, borderBottomWidth: 1, borderBottomColor: C.border, flexDirection: "row", alignItems: "center", paddingHorizontal: 15, gap: 11 },
+  aiModalBrandIcon: { width: 40, height: 40, borderRadius: 14, backgroundColor: C.paleBlue, alignItems: "center", justifyContent: "center" },
+  aiModalBrandIconText: { color: C.primary, fontSize: 25, fontWeight: "900" },
+  aiModalBrand: { color: C.navy, fontSize: 15, fontWeight: "900" },
+  aiModalSubtitle: { color: C.muted, fontSize: 11, marginTop: 3 },
+  aiModalClose: { width: 36, height: 36, borderRadius: 18, backgroundColor: "#F1F5F9", alignItems: "center", justifyContent: "center" },
+  aiModalCloseText: { color: C.text, fontSize: 27, lineHeight: 30 },
+  aiModalScroll: { flex: 1 },
+  aiModalScrollContent: { padding: 13, paddingBottom: 22 },
+  aiPanelTitle: { color: C.navy, fontSize: 17, fontWeight: "900" },
+  aiNewChat: { paddingHorizontal: 12, paddingVertical: 8, borderRadius: 10, backgroundColor: C.paleBlue },
+  aiNewChatText: { color: C.primary, fontWeight: "800", fontSize: 12 },
+  aiSuggestions: { width: "100%", gap: 8, marginTop: 18 },
+  aiSuggestion: { borderWidth: 1, borderColor: "#BFDBFE", backgroundColor: "#F8FBFF", borderRadius: 12, paddingHorizontal: 12, paddingVertical: 10 },
+  aiSuggestionText: { color: "#1D4ED8", fontSize: 12, fontWeight: "700" },
+  aiHeadingRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    marginBottom: 12,
+  },
+  aiChatCard: {
+    backgroundColor: C.white,
+    borderWidth: 1,
+    borderColor: C.border,
+    borderRadius: 16,
+    padding: 12,
+    minHeight: 210,
+    gap: 12,
+  },
+  aiWelcome: {
+    alignItems: "center",
+    justifyContent: "center",
+    paddingVertical: 48,
+    paddingHorizontal: 18,
+  },
+  aiWelcomeIcon: {
+    color: C.primary,
+    fontSize: 34,
+    marginBottom: 8,
+  },
+  aiWelcomeTitle: {
+    color: C.navy,
+    fontSize: 18,
+    fontWeight: "900",
+  },
+  aiWelcomeText: {
+    color: C.muted,
+    fontSize: 13,
+    lineHeight: 20,
+    textAlign: "center",
+    marginTop: 8,
+  },
+  aiMessageRow: {
+    width: "100%",
+    flexDirection: "row",
+  },
+  aiUserRow: {
+    justifyContent: "flex-end",
+  },
+  aiAssistantRow: {
+    justifyContent: "flex-start",
+  },
+  aiBubble: {
+    maxWidth: "90%",
+    borderRadius: 14,
+    paddingHorizontal: 13,
+    paddingVertical: 10,
+  },
+  aiUserBubble: {
+    backgroundColor: C.primary,
+    borderBottomRightRadius: 4,
+  },
+  aiAssistantBubble: {
+    backgroundColor: "#F1F5F9",
+    borderBottomLeftRadius: 4,
+  },
+  aiMessageText: {
+    color: C.text,
+    fontSize: 14,
+    lineHeight: 21,
+  },
+  aiUserMessageText: {
+    color: C.white,
+  },
+  aiSources: {
+    color: C.muted,
+    fontSize: 10,
+    marginTop: 8,
+  },
+  aiTyping: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 9,
+    padding: 8,
+  },
+  aiComposer: {
+    flexDirection: "row",
+    alignItems: "flex-end",
+    gap: 8,
+    marginTop: 12,
+    backgroundColor: C.white,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: C.border,
+    padding: 7,
+  },
+  aiInput: {
+    flex: 1,
+    minHeight: 44,
+    maxHeight: 120,
+    color: C.text,
+    fontSize: 14,
+    paddingHorizontal: 8,
+    paddingVertical: 10,
+  },
+  aiSendButton: {
+    width: 42,
+    height: 42,
+    borderRadius: 12,
+    backgroundColor: C.primary,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  aiSendDisabled: {
+    opacity: 0.45,
+  },
+  aiSendText: {
+    color: C.white,
+    fontSize: 20,
+    fontWeight: "900",
+  },
+  aiDisclaimer: {
+    color: C.muted,
+    fontSize: 10,
+    lineHeight: 15,
+    marginTop: 8,
+    marginBottom: 10,
   },
   infoRow: {
     paddingVertical: 11,
@@ -3322,3 +3752,5 @@ pageTitle: {
     paddingHorizontal: 5,
   },
 });
+
+let styles = createStyles();

@@ -3,7 +3,7 @@
   "expo": {
     "name": "SEIYALAM",
     "slug": "seiyalam",
-    "version": "1.0.0",
+    "version": "1.0.2",
     "orientation": "portrait",
     "icon": "./assets/images/sei.png",
     "scheme": "seiyalam",
@@ -13,6 +13,9 @@
     },
     "android": {
       "package": "com.seiyalam.app",
+        "permissions": [
+    "REQUEST_INSTALL_PACKAGES"
+  ],
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
         "foregroundImage": "./assets/images/sei.png",
