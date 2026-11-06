@@ -10,7 +10,7 @@ const isElectron =
     window.location.port === "5173");
 
 // Add official download URLs when installation files are ready.
-const ANDROID_DOWNLOAD_URL = "https://wf-artifacts.eascdn.net/builds/internal-st/453b77fa-b570-44c3-b603-1cf301bd201b/26cb1b22-f3b6-438d-a0a1-4242282239bb/01a1aa17-0430-7164-a5cc-e7da1b02a936/application-26cb1b22-f3b6-438d-a0a1-4242282239bb.apk?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Content-Sha256=UNSIGNED-PAYLOAD&X-Amz-Credential=75d871a1a44e598975dd84fa2341c9b0%2F20261105%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date=20261105T050645Z&X-Amz-Expires=900&X-Amz-Signature=3800ca041b3a01ecc1ae4d0cc491f27ebef85c7ce80a4d6760016f6fcb7f128a&X-Amz-SignedHeaders=host&x-amz-checksum-mode=ENABLED&x-id=GetObject";
+const ANDROID_DOWNLOAD_URL = "https://github.com/Rogith01/SEIYALAM/releases/latest/download/SEIYALAM-Android.apk";
 const WINDOWS_DOWNLOAD_URL = "https://github.com/Rogith01/SEIYALAM/releases/latest/download/SEIYALAM-Setup.exe";
 
 
